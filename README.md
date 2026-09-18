@@ -53,35 +53,30 @@ The host application decides what an entry ID represents, what an assignee ID re
 
 Emergency departments do not normally treat patients strictly on a first-come-first-served basis. Patients are clinically assessed by trained healthcare professionals and assigned a triage priority representing the urgency of their condition.
 
-### Numeric priority, not fixed categories
+### Priority is a datatype, not a fixed scale
 
-The queue is **not** hard-coded to categories such as `Red` / `Orange` / `Yellow` / `Green`. Instead, it works with **numeric triage priorities**, where a smaller number means greater urgency:
+The queue is **not** hard-coded to categories such as `Red` / `Orange` / `Yellow` / `Green`, and it does **not** hard-code a specific range such as `1`–`7`. The host application defines its own priority values entirely — how many levels exist, and what each one means, is never dictated by this repository.
 
-```text
-1 = highest priority (most urgent)
-...
-7 = lowest priority (least urgent)
-```
-
-The initial planned range is **1 through 7**, but this is a convention of the reference triage layer, not a limit the engine enforces. The engine only needs to understand ordering:
+What the engine *does* fix is the **datatype contract**: a `Priority` must be an **ordered, comparable value** — in practice, a numeric type (e.g. an integer), where a smaller number means greater urgency:
 
 ```text
-1 < 2 < 3 < 4 < 5 < 6 < 7
+smaller number = more urgent
+larger number  = less urgent
 ```
 
-The meaning of each number — what clinical condition maps to `Priority 2` vs `Priority 5` — is decided entirely by the clinical framework or institution using the system, not by this repository. See [Priority Is Host-Defined, Not Fixed by the Engine](#priority-is-host-defined-not-fixed-by-the-engine).
+The engine's only requirement is that `Priority` values support ordering comparison (`<`, `==`), so entries can be sorted consistently and deterministically. It does not care what the numbers are, how many distinct values are used, or what they mean clinically.
 
-Because the engine only compares priority values, it remains generic enough to support institutions with fewer or more levels without any change to the ordering logic:
+For example, one host might use `1`–`4`, another `1`–`7`, another `0`–`100`, and the engine's ordering logic does not change:
 
 ```text
 Hospital A → priorities 1–4
-Hospital B → priorities 1–5
-Hospital C → priorities 1–7
+Hospital B → priorities 1–7
+Hospital C → priorities 0–100
 ```
 
-A trained clinical professional, or an external clinical system, determines the priority. The queue engine receives the resulting number. It does **not** determine why that priority was assigned, does not interpret symptoms, and does not increase priority merely because time has passed.
+A trained clinical professional, or an external clinical system, determines the priority value. The queue engine receives that number. It does **not** determine why that priority was assigned, does not interpret symptoms, and does not increase priority merely because time has passed.
 
-A reference mapping — for example the **South African Triage Scale (SATS)** — can live in a small triage-specific layer (`triage/sats.go`) that sits outside the core queue package, translating clinical categories into numeric priorities:
+A reference mapping — for example the **South African Triage Scale (SATS)**, using a 1–4 scale — can live in a small triage-specific layer (`triage/sats.go`) that sits outside the core queue package, translating clinical categories into numeric priorities:
 
 ```text
 SATS Category    Queue Priority
@@ -91,7 +86,7 @@ Yellow      →    3
 Green       →    4
 ```
 
-The core `queue` package never sees `"Red"` or `"Green"` — it only ever operates on `Priority` (a comparable numeric value).
+This is one possible mapping chosen by the reference triage layer, not a constraint the `queue` package enforces. The core `queue` package never sees `"Red"` or `"Green"` — it only ever operates on `Priority` (an ordered, comparable numeric value), and it never assumes a fixed number of levels or a fixed range.
 
 ### Example: priority changes through reassessment
 
@@ -164,6 +159,8 @@ The project deliberately separates **clinical/domain decision-making** (owned by
 Internally, the core `queue` package is not coupled to patient-specific (or any domain-specific) data. Its central concept is intentionally minimal:
 
 ```go
+type Priority int
+
 type Entry struct {
     ID       EntryID
     Priority Priority
@@ -171,15 +168,19 @@ type Entry struct {
 }
 ```
 
+`Priority` is a plain, ordered numeric type — the engine does not fix its range or the number of distinct values in use, only that lower values sort as more urgent. The host application chooses which values it actually assigns.
+
 The engine only needs concepts such as: entry ID, priority, queue sequence/order, queue state, assignee ID, assignment, ordering rules, and events. The external system decides what those IDs represent.
 
 For example, `EntryID("abc123")` might correspond to a patient in a hospital application — the queue engine does not know that. Similarly, `AssigneeID("xyz789")` might correspond to a doctor, clinician, workstation, or team — the engine treats it as an opaque identifier.
 
 ### Priority Is Host-Defined, Not Fixed by the Engine
 
-The engine does **not** dictate a priority scale. It does not decide how many priority levels exist, what they mean, or which values are valid — it only needs `Priority` values to be comparable, so it can order entries consistently and deterministically.
+The engine does **not** dictate a priority scale. It does not decide how many priority levels exist, what they mean, or which values are valid.
 
-The four-level SATS mapping (Red/Orange/Yellow/Green → 1–4) shown above is one example, supplied by the `triage` reference layer for the emergency-department use case. A different host application could use two levels, ten levels, or a non-numeric ordered scheme entirely — the `queue` core does not care, as long as the host consistently supplies comparable `Priority` values. The engine enforces *ordering*; the host defines *what the priorities mean and how many there are*.
+What it does fix is the datatype contract: `Priority` must be an **ordered, comparable numeric value** (e.g. an integer type), where a smaller value means greater urgency. That is the entire constraint the engine imposes.
+
+The four-level SATS mapping (Red/Orange/Yellow/Green → 1–4) shown above is one example, supplied by the `triage` reference layer for the emergency-department use case. A different host application could use two levels, ten levels, or an entirely different numeric range — the `queue` core does not care, as long as the host consistently supplies comparable `Priority` values within that datatype. The engine enforces *ordering*; the host defines *what the priorities mean and how many there are*.
 
 ### What the repository must not own
 
