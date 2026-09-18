@@ -120,6 +120,12 @@ The engine only needs concepts such as: entry ID, priority, queue sequence/order
 
 For example, `EntryID("abc123")` might correspond to a patient in a hospital application — the queue engine does not know that. Similarly, `AssigneeID("xyz789")` might correspond to a doctor, clinician, workstation, or team — the engine treats it as an opaque identifier.
 
+### Priority Is Host-Defined, Not Fixed by the Engine
+
+The engine does **not** dictate a priority scale. It does not decide how many priority levels exist, what they mean, or which values are valid — it only needs `Priority` values to be comparable, so it can order entries consistently and deterministically.
+
+The four-level SATS mapping (Red/Orange/Yellow/Green → 1–4) shown above is one example, supplied by the `triage` reference layer for the emergency-department use case. A different host application could use two levels, ten levels, or a non-numeric ordered scheme entirely — the `queue` core does not care, as long as the host consistently supplies comparable `Priority` values. The engine enforces *ordering*; the host defines *what the priorities mean and how many there are*.
+
 ### What the repository must not own
 
 The repository must **not** own:
