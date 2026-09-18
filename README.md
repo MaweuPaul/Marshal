@@ -66,7 +66,7 @@ larger rank  = lower priority
 
 The engine's only requirement is that rank values support ordering comparison, so entries sort consistently and deterministically. It does not care how many distinct ranks are configured or what they're named.
 
-A human-readable **priority level** — a name plus a rank — is a configuration concept that sits *above* the queue core, typically owned by the host application (or a thin configuration layer such as `triage/`). For example:
+A human-readable **priority level** — a name plus a rank — is a configuration concept that sits *above* the queue core, typically owned by the host application (or a thin configuration layer). For example:
 
 ```go
 type PriorityLevel struct {
@@ -102,7 +102,7 @@ No code change is required to add, rename, reorder, or retire a level — that i
 
 A trained clinical professional, or an external clinical system, determines which priority level applies. The queue engine receives the resulting rank. It does **not** determine why that level was assigned, does not interpret symptoms, and does not increase priority merely because time has passed.
 
-The reference **South African Triage Scale (SATS)** mapping is one example of such a configuration, expressed by the `triage` reference layer (`triage/sats.go`) outside the core queue package:
+The reference **South African Triage Scale (SATS)** mapping is one example of such a configuration — conceptually a small lookup outside the core queue package, not something the `queue` package itself defines:
 
 ```text
 SATS Category    Priority Level    Rank
@@ -567,9 +567,6 @@ marshal/
 │   ├── events.go
 │   ├── errors.go
 │   └── queue_test.go
-│
-├── triage/
-│   └── sats.go
 │
 ├── examples/
 │   └── emergency-department/
