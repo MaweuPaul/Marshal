@@ -1,4 +1,4 @@
-# Triage Queue
+# Ordexa
 
 A deterministic, concurrent, auditable **priority-assignment queue engine**, built in Go, developed around emergency-department triage as its reference use case.
 
@@ -405,7 +405,7 @@ Optional adapters or examples may be added later (e.g. a PostgreSQL-backed host,
 ## Project Structure — Planned
 
 ```text
-triage-queue/
+ordexa/
 │
 ├── queue/
 │   ├── queue.go
