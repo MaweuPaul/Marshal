@@ -49,6 +49,20 @@ The host application decides what an entry ID represents, what an assignee ID re
 
 ---
 
+## Why Not Just Use X?
+
+A fair question, since this territory is already crowded. Two categories of existing project cover pieces of this, but not the combination:
+
+**Generic priority/work queue libraries** (e.g. Go priority-queue packages built on `container/heap`, or job queues with atomic claim semantics like a Redis-backed task queue) get the data structure and the "claim exactly once" concurrency guarantee right, but stop there. They don't model priority as host-configurable levels with a stable rank, don't define an event contract for *why* the queue reordered something, and don't draw a line around what the queue is and isn't allowed to know about the caller's domain.
+
+**Hospital/ER triage projects** on the other hand usually go the opposite direction: a single repository bundling a patient database, a UI dashboard, authentication, and sometimes AI-assisted severity scoring, with the actual ordering logic buried inside as an implementation detail rather than exposed as a reusable engine. Swapping the domain (a different queueing scenario entirely, not just a different hospital) usually means forking the whole application.
+
+This project is neither. It's a small, dependency-free library that owns exactly the ordering/assignment/concurrency/audit problem — and nothing else. Triage is the reference example precisely because it's a domain with real invariants (higher acuity must not be bypassed, an assignment must never happen twice, reassessment must be reflected immediately) that a toy `PriorityQueue.Pop()` doesn't need to prove itself against. Once those invariants hold here, they hold for any other "who goes next" problem — a support-ticket queue, a ride-dispatch system, a call-center routing engine — without touching the core.
+
+If your problem *is* just "give me a thread-safe heap," a generic priority-queue package is simpler and you should use that instead. If your problem *is* a full hospital information system, this engine is deliberately not that, and you'd build (or buy) one on top of something like this rather than instead of it.
+
+---
+
 ## Reference Domain: Emergency-Department Triage
 
 Emergency departments do not normally treat patients strictly on a first-come-first-served basis. Patients are clinically assessed by trained healthcare professionals and assigned a triage priority representing the urgency of their condition.
