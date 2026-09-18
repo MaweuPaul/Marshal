@@ -1,102 +1,94 @@
 # Triage Queue
 
-A concurrent, auditable priority-queue engine for emergency-department patient assignment, built in Go.
+A deterministic, concurrent, auditable **priority-assignment queue engine**, built in Go, developed around emergency-department triage as its reference use case.
 
-The system is designed to answer one core question correctly, even under concurrent load:
+This repository is **not** a patient-management system, hospital application, clinical decision system, or database-backed healthcare platform.
 
-**Given all eligible patients currently waiting, which patient should be assigned next?**
+The engine is designed to answer one core question correctly, even under concurrent load:
 
-The system does **not** determine a patient's medical condition or assign a clinical triage category. That responsibility belongs to trained healthcare professionals using an established clinical triage process.
+**Given all currently eligible queue entries, which entry should be assigned next?**
 
-Once a triage category has been assigned, this system is responsible for maintaining the queue, enforcing the ordering rules, handling reassessments supplied by clinical staff, and ensuring that the same patient cannot be assigned to multiple clinicians simultaneously.
+Emergency triage remains the motivating example and explains why this engine exists, but the queue engine itself does **not** store or understand patient information. It operates on opaque entry and assignee identifiers, externally supplied priorities, and queue-relevant facts — nothing more.
 
 > **Status:** Planning stage. Nothing in this repository has been implemented yet. Everything below describes the intended design and current design decisions, not existing functionality. See [Disclaimer](#disclaimer).
 
 ---
 
-## Problem Statement
+## Core Idea
 
-Emergency departments do not normally treat patients strictly on a first-come-first-served basis.
-
-Patients are clinically assessed by trained healthcare professionals and assigned a triage category representing the urgency of their condition.
-
-For this project, the intended reference model is the **South African Triage Scale (SATS)**, which uses four principal clinical urgency categories:
-
-| Priority | SATS Category | General Queue Meaning |
-| -------- | ------------- | --------------------- |
-| 1        | Red           | Emergency             |
-| 2        | Orange        | Very urgent           |
-| 3        | Yellow        | Urgent                |
-| 4        | Green         | Routine               |
-
-The clinical category is supplied to the system by a trained person.
-
-The queue engine does **not** independently diagnose patients, calculate medical severity, or promote a patient to a more urgent clinical category merely because time has passed.
-
-Its responsibility begins **after clinical triage**.
-
-At its simplest, the queue follows two ordering rules:
-
-1. **Clinical priority first** — a patient in a more urgent triage category must be considered before an eligible patient in a less urgent category.
-2. **Arrival order within the same category** — where two eligible patients have the same triage category, the patient who entered the queue earlier is considered first.
-
-For example:
+The engine accepts **commands** and emits **events**. It does not diagnose, interpret meaning, own domain records, or dictate persistence technology.
 
 ```text
-Patient A → Green   → arrived 08:00
-Patient B → Yellow  → arrived 08:10
-Patient C → Orange  → arrived 08:40
-Patient D → Red     → arrived 09:05
-Patient E → Yellow  → arrived 07:50
+External / Host Application
+          │
+          │ commands
+          ▼
+┌──────────────────────────┐
+│       Queue Engine       │
+│                          │
+│ ordering                 │
+│ invariants               │
+│ state transitions        │
+│ assignment rules         │
+│ concurrency              │
+└────────────┬─────────────┘
+             │
+             │ events
+             ▼
+     Host Application
+             │
+             ├── PostgreSQL
+             ├── MySQL
+             ├── Kafka
+             ├── event store
+             ├── files
+             └── anything else
 ```
 
-The expected queue order is:
+The host application decides what an entry ID represents, what an assignee ID represents, and how (or whether) to persist the events the engine emits. This repository defines queue semantics and event contracts. It does not define storage infrastructure.
 
-```text
-1. Patient D → Red
-2. Patient C → Orange
-3. Patient E → Yellow
-4. Patient B → Yellow
-5. Patient A → Green
-```
+---
 
-A Green patient who has waited longer does not automatically become Red, Orange, or Yellow.
+## Reference Domain: Emergency-Department Triage
 
-If a patient's clinical condition changes, a trained healthcare professional performs a reassessment and submits the updated triage category to the system. The queue engine then reorders the patient according to the new externally supplied category.
+Emergency departments do not normally treat patients strictly on a first-come-first-served basis. Patients are clinically assessed by trained healthcare professionals and assigned a triage category representing the urgency of their condition.
 
-The engineering challenge is therefore not to perform clinical triage, but to maintain this ordering correctly under real operational conditions such as:
+The reference model is the **South African Triage Scale (SATS)**, which maps to queue priority as follows:
 
-* multiple clinicians requesting patients concurrently;
-* new patients entering the queue;
-* clinical reassessments changing an existing patient's category;
-* patients moving through different workflow states;
-* application or database failures;
-* repeated requests caused by network failures; and
-* the need to reconstruct why a particular assignment occurred.
+| SATS Category | General Meaning | Queue Priority |
+| -------------- | ---------------- | -------------- |
+| Red            | Emergency         | 1              |
+| Orange         | Very urgent       | 2              |
+| Yellow         | Urgent            | 3              |
+| Green          | Routine           | 4              |
+
+A trained clinical professional, or an external clinical system, determines the triage category. The queue engine receives the resulting priority. It does **not** determine why the priority was assigned, does not interpret symptoms, and does not increase priority merely because time has passed.
+
+This mapping lives in a small triage-specific layer (`triage/sats.go`) that sits outside the core queue package — the core `queue` package operates on `Priority`, never on clinical terminology.
 
 ---
 
 ## Responsibility Boundary
 
-The project deliberately separates **clinical decision-making** from **queue decision-making**.
+The project deliberately separates **clinical/domain decision-making** (owned by the host application) from **queue ordering and assignment decision-making** (owned by this repository).
 
 ```text
-             CLINICAL RESPONSIBILITY
+             HOST-APPLICATION RESPONSIBILITY
 
-                 Patient arrives
+               Domain event occurs
+              (e.g. patient arrives,
+             condition is reassessed)
                        │
                        ▼
-            Trained triage professional
+              Trained professional or
+               external system acts
                        │
-                       │ assesses patient
-                       ▼
-             Triage category assigned
-                       │
+                       │ determines priority
                        ▼
 
 ────────────────────────────────────────────────
 
-              SOFTWARE RESPONSIBILITY
+                QUEUE-ENGINE RESPONSIBILITY
 
                        │
                        ▼
@@ -109,360 +101,304 @@ The project deliberately separates **clinical decision-making** from **queue dec
                      tracking   safety
                        │
                        ▼
-                Next eligible patient
+                Next eligible entry
 ```
 
-The software may store and act upon a triage category, but it must not present itself as the authority that clinically assigned that category.
+### What the queue core should not know
+
+Internally, the core `queue` package is not coupled to patient-specific (or any domain-specific) data. Its central concept is intentionally minimal:
+
+```go
+type Entry struct {
+    ID       EntryID
+    Priority Priority
+    Sequence uint64
+}
+```
+
+The engine only needs concepts such as: entry ID, priority, queue sequence/order, queue state, assignee ID, assignment, ordering rules, and events. The external system decides what those IDs represent.
+
+For example, `EntryID("abc123")` might correspond to a patient in a hospital application — the queue engine does not know that. Similarly, `AssigneeID("xyz789")` might correspond to a doctor, clinician, workstation, or team — the engine treats it as an opaque identifier.
+
+### What the repository must not own
+
+The repository must **not** own:
+
+* patient names, age, diagnosis, symptoms, medical history, or clinical notes
+* the reason for a reassessment
+* clinician records or doctor names
+* hospital records or hospital workflow data
+* authentication
+* medical-record storage
+* a UI
+* a specific persistence technology (PostgreSQL, MySQL, MongoDB, Kafka, SQLite, an event store, files, or anything else)
+
+Those belong to the external application integrating the queue.
+
+### What the queue owns
+
+Although the *clinical reason* for a priority change belongs outside the repository, the queue engine does need to know *that* the priority changed, because that affects ordering. For example:
+
+```text
+08:04  Entry abc123 added        (priority = 4, sequence = 27)
+08:37  Priority changed          (4 → 1)
+08:38  Entry assigned            (assignee = doctor-17, priority at assignment = 1, sequence = 27)
+```
+
+The queue does **not** need `"Reason: patient condition deteriorated"` — that explanation belongs to the clinical system. The queue merely records the queue-relevant fact:
+
+```text
+PriorityChanged
+EntryID: abc123
+From: 4
+To: 1
+```
 
 ---
 
 ## Core Queue Invariants
 
-The correctness of the system will be defined primarily through invariants rather than individual examples.
+### Q1 — Higher Priority Cannot Be Bypassed
 
-### Q1 — Higher Clinical Priority Cannot Be Bypassed
-
-Given two patients `A` and `B` who are both waiting and eligible for assignment:
+Given two eligible entries `A` and `B`:
 
 ```text
-if A has a higher clinical triage priority than B,
+if A has a higher priority than B,
 B must not be assigned while A remains eligible.
 ```
 
-For the current SATS-based model:
+### Q2 — FIFO Within the Same Priority
+
+Where two eligible entries have the same priority, the entry with the earlier queue sequence is selected first.
 
 ```text
-Red > Orange > Yellow > Green
+priority
+  → sequence
 ```
 
-Therefore:
+A monotonically increasing queue sequence is used as the tie-breaker rather than relying solely on timestamps, since two entries could theoretically share an identical timestamp. The queue core is deterministic: given identical state and commands, it makes the same ordering decision every time.
+
+### Q3 — An Entry Cannot Be Assigned Twice
+
+An entry may have at most one active assignment. Two concurrent callers requesting the next entry must never receive the same entry:
 
 ```text
-Red    cannot be bypassed by Orange, Yellow, or Green
-Orange cannot be bypassed by Yellow or Green
-Yellow cannot be bypassed by Green
+one queue entry → at most one active assignment
 ```
 
----
+### Q4 — Priority Changes Come From Outside the Queue Engine
 
-### Q2 — FIFO Within the Same Triage Category
+The queue engine does not independently change an entry's priority because time has elapsed. The host application submits an `UpdatePriority` command; the engine reorders and emits a `PriorityChanged` event. The previous priority remains part of the auditable event history.
 
-Where two eligible patients have the same triage category:
+### Q5 — Assignment Records Are Immutable
+
+An assignment is an immutable fact. Once an `AssignmentCreated` event has been produced, it is never edited to rewrite history. If something later changes (for example, an assignment needs to be undone), a new event is appended instead:
 
 ```text
-the patient who entered the queue earlier is selected first
+AssignmentCreated
+       ↓
+   (later)
+       ↓
+AssignmentCancelled
 ```
 
-unless a future explicitly documented policy introduces another valid ordering rule.
+rather than mutating the original assignment record.
 
----
+### Q6 — Assigned Entries Leave the Active Queue
 
-### Q3 — A Patient Cannot Be Assigned Twice
-
-A patient may have at most one active assignment.
-
-Two clinicians requesting the next patient simultaneously must never receive the same patient.
-
-For example:
-
-```text
-Doctor A ─────┐
-              ├── simultaneous requests
-Doctor B ─────┘
-```
-
-must result in something equivalent to:
-
-```text
-Doctor A → Patient X
-Doctor B → Patient Y
-```
-
-and never:
-
-```text
-Doctor A → Patient X
-Doctor B → Patient X
-```
-
----
-
-### Q4 — Clinical Reassessment Comes From Outside the Queue Engine
-
-The queue engine does not independently change a patient's triage category because time has elapsed.
-
-Instead:
-
-```text
-Patient condition changes
-        │
-        ▼
-Clinical reassessment
-        │
-        ▼
-New triage category submitted
-        │
-        ▼
-Queue engine updates ordering
-```
-
-The previous category and reassessment should remain auditable.
-
----
-
-### Q5 — Queue Decisions Must Be Explainable
-
-For any assignment, it should eventually be possible to determine:
-
-* which patients were eligible at the time;
-* what triage category each patient had;
-* when each patient entered the queue;
-* whether any reassessments had occurred;
-* which patient was selected;
-* when the assignment occurred; and
-* which clinician or system actor initiated the assignment.
-
----
-
-## Initial Patient State Model
-
-The exact state machine is still under design, but the initial model is expected to resemble:
+Once an entry is successfully assigned, it is no longer eligible to be returned by the active queue:
 
 ```text
 WAITING
-   │
-   ▼
+   ↓
 ASSIGNED
-   │
-   ▼
-IN_TREATMENT
-   │
-   ▼
-COMPLETED
 ```
 
-Other terminal or exceptional states may later be added, such as:
-
-```text
-CANCELLED
-LEFT
-TRANSFERRED
-```
-
-A reassessment does not necessarily change the patient's workflow state. It changes the clinical triage information associated with the patient and may therefore change their position in the waiting queue.
+The invariant: an entry with an active assignment must not remain eligible in the waiting queue. This is a removal from active eligibility, not a deletion of history — the assignment and prior events remain available for auditing.
 
 ---
 
-## Target Design Goals
+## Atomic `AssignNext`
 
-These are properties the system is intended to guarantee once implemented.
+The public API avoids a two-step workflow like:
 
-### 1. Correctness Under Concurrency
+```go
+entry := queue.Next()
+queue.Assign(entry, assigneeID)
+```
 
-Multiple clinicians may request patients simultaneously without causing duplicate assignments or corrupting queue state.
+because there is a race window between selecting and assigning the entry — two concurrent callers could select the same entry before either assigns it.
 
-Correctness should eventually hold beyond a single Go process so that multiple application instances can safely operate against the same persistent state.
+Instead, the engine exposes a single atomic operation:
 
-### 2. Clinical Priority Is Preserved
+```go
+assignment, events, err := queue.AssignNext(assigneeID)
+```
 
-The queue must consistently enforce the ordering policy derived from the externally assigned clinical triage categories.
+Conceptually, this operation:
 
-A lower-priority eligible patient must not be assigned while a higher-priority eligible patient is waiting.
-
-### 3. Reassessment Is Reflected Correctly
-
-When authorized clinical staff submit a new triage category, the patient's queue position must reflect the new information.
-
-The system must preserve enough history to distinguish the original triage assessment from later reassessments.
-
-### 4. No Silent Data Loss
-
-Important state changes should not be reported as successful unless the durable state required to support them has been recorded.
-
-### 5. Auditability
-
-It should be possible to reconstruct the relevant state and reasoning behind an assignment.
-
-### 6. Graceful Failure Handling
-
-Database, network, cache, notification, or application failures should be handled explicitly rather than silently ignored.
-
-### 7. Deterministic Core Logic
-
-Given the same patient state, eligibility rules, triage categories, arrival times, and evaluation time, the core ordering logic should produce the same result.
+1. determines the highest-ranked eligible entry;
+2. claims that entry atomically;
+3. removes it from active waiting eligibility;
+4. creates the immutable assignment fact;
+5. returns the resulting event(s).
 
 ---
 
-## Planned Architecture
-
-The architecture is still being evaluated.
-
-The current direction separates the deterministic queueing rules from persistence, HTTP, notifications, and other infrastructure.
+## Commands In, Events Out
 
 ```text
-                 ┌─────────────────────┐
-                 │      API Layer      │
-                 └──────────┬──────────┘
-                            │
-                 ┌──────────▼──────────┐
-                 │   Triage Engine     │
-                 │                     │
-                 │ ordering            │
-                 │ state transitions   │
-                 │ assignment rules    │
-                 └──────────┬──────────┘
-                            │
-                  ┌─────────▼─────────┐
-                  │   Persistence     │
-                  │   PostgreSQL      │
-                  └─────────┬─────────┘
-                            │
-             ┌──────────────┼──────────────┐
-             │              │              │
-             ▼              ▼              ▼
-        Current State   Audit History   Notifications
+COMMAND
+   ↓
+QUEUE ENGINE
+   ↓
+EVENT(S)
 ```
 
-The core queue rules should remain as independent as practical from:
+Possible commands (kept intentionally minimal for v1):
 
-* HTTP;
-* PostgreSQL;
-* authentication;
-* notifications; and
-* deployment infrastructure.
+```text
+AddEntry
+UpdatePriority
+RemoveEntry
+AssignNext
+```
 
-This should allow the ordering engine to be tested directly and deterministically.
+Possible emitted events:
+
+```text
+EntryAdded
+PriorityChanged
+EntryRemoved
+AssignmentCreated
+```
+
+A potential future event: `AssignmentCancelled`. The event set is not over-designed up front — it grows only as real needs emerge.
+
+### Example event shapes
+
+These are illustrative, not a final Go API:
+
+```go
+type EntryAdded struct {
+    EntryID    EntryID
+    Priority   Priority
+    Sequence   uint64
+    OccurredAt time.Time
+}
+
+type PriorityChanged struct {
+    EntryID     EntryID
+    OldPriority Priority
+    NewPriority Priority
+    OccurredAt  time.Time
+}
+
+type AssignmentCreated struct {
+    EntryID              EntryID
+    AssigneeID           AssigneeID
+    PriorityAtAssignment Priority
+    Sequence             uint64
+    OccurredAt           time.Time
+}
+```
 
 ---
 
-## Persistence Strategy
+## Persistence Belongs to the Host
 
-The persistence architecture has **not yet been finalized**.
+The queue engine does not dictate PostgreSQL, MySQL, MongoDB, Kafka, SQLite, an event store, files, or any other persistence technology. A consuming application does something conceptually like:
 
-Two approaches are currently being considered.
-
-### Option A — Relational State + Immutable Audit Log
-
-PostgreSQL stores the current authoritative state while a separate append-only audit table records important transitions.
-
-Conceptually:
-
-```text
-PostgreSQL
-├── patients
-├── assignments
-├── reassessments
-└── audit_events
+```go
+events, err := q.UpdatePriority(id, 1)
 ```
 
-This provides a comparatively simple persistence model while preserving a strong audit trail.
+and then, entirely at its own discretion:
 
-### Option B — Event-Sourced State
-
-An append-only event stream acts as the source of truth and current state is reconstructed through projections.
-
-Conceptually:
-
-```text
-Commands
-   │
-   ▼
-Events
-   │
-   ├── PatientRegistered
-   ├── PatientTriaged
-   ├── PatientReassessed
-   ├── PatientAssigned
-   └── TreatmentCompleted
-   │
-   ▼
-Current-state projections
+```go
+repository.Save(events)
+// or
+kafka.Publish(events)
+// or
+eventStore.Append(events)
 ```
 
-Event sourcing may provide useful audit and recovery characteristics but introduces additional complexity involving replay, event versioning, projections, idempotency, and consistency.
+The queue does not care which. This repository defines queue semantics and event contracts; it does not define storage infrastructure.
 
-The project will not adopt event sourcing solely because it appears architecturally sophisticated. The persistence model should be chosen based on the invariants the system actually needs to guarantee.
+### Event replay (future direction)
+
+Because the queue produces immutable events, a future design may allow rebuilding queue state by replaying previously stored events:
+
+```go
+q := queue.New()
+
+for _, event := range storedEvents {
+    q.Apply(event)
+}
+```
+
+This is a **potential future capability**, not a version-1 requirement. This project does not present itself as a complete event-sourced architecture at this stage — the goal for v1 is simple immutable events and a clean integration boundary, not full event sourcing.
+
+### Open integration question (future design work)
+
+External persistence introduces consistency questions that remain open, for example:
+
+```text
+1. engine assigns entry
+2. event is emitted
+3. host crashes before persisting event
+```
+
+The eventual integration contract must define how persistence, retries, idempotency, and recovery work. This is deliberately left as future design work rather than solved by baking a specific database into the core.
 
 ---
 
 ## Concurrency Model
 
-Concurrency is a central part of the project.
+Concurrency is central to this project. `AssignNext` must guarantee that two concurrent callers never receive the same entry, and the in-memory engine will be validated with randomized concurrent load and the Go race detector.
 
-An in-memory mutex may protect data inside one Go process, but it is not sufficient by itself if multiple application instances share the same database.
-
-The eventual assignment mechanism must therefore support a scenario such as:
-
-```text
-              PostgreSQL
-             /          \
-            /            \
-       Server A        Server B
-          │               │
-      Doctor A         Doctor B
-```
-
-Both servers may attempt to assign the next patient concurrently.
-
-The system must preserve the invariant:
-
-```text
-one patient → at most one active assignment
-```
-
-The exact database transaction and locking strategy will be selected during the persistence/concurrency design phase.
+How a host application coordinates `AssignNext` across multiple processes or machines (e.g. multiple servers sharing persisted queue state) is part of the future integration contract described above, not a v1 requirement of the core engine.
 
 ---
 
-## Queue Ordering
+## Repository Responsibility
 
-The initial queue ordering policy is intentionally simple.
-
-For two eligible waiting patients `A` and `B`:
+### The repository SHOULD own
 
 ```text
-1. Compare triage category.
-2. Higher clinical priority wins.
-3. If categories are equal, compare queue-entry time.
-4. Earlier queue-entry time wins.
+Entry
+EntryID
+Priority
+Sequence
+Ordering
+Active queue state
+AssignNext
+Priority updates
+Concurrency safety
+Invariants
+Immutable queue events
+Deterministic behaviour
+Testing
 ```
 
-Conceptually:
+### The repository SHOULD NOT own
 
 ```text
-priority(A) < priority(B)
-        │
-        ├── yes → A first
-        │
-        └── no
-             │
-      same category?
-             │
-             └── earlier arrival first
+Patient records
+Doctor records
+Clinical records
+Clinical decision making
+Reason for reassessment
+Database implementation
+PostgreSQL
+Authentication
+HTTP API
+UI
+Notifications
+Hospital workflow
 ```
 
-The first implementation will **not** automatically modify clinical acuity based on elapsed waiting time.
-
-Future work may investigate queue-aging or alerting policies, but those mechanisms must remain distinct from clinical reassessment unless backed by an explicitly adopted clinical policy.
-
----
-
-## Tech Stack — Planned
-
-| Layer                      | Current Direction                                            |
-| -------------------------- | ------------------------------------------------------------ |
-| Language                   | Go                                                           |
-| Core ordering              | Go standard library / custom queue logic                     |
-| Initial priority structure | `container/heap` under evaluation                            |
-| API                        | REST                                                         |
-| Persistence                | PostgreSQL                                                   |
-| Concurrency                | Go synchronization + database-level transactional guarantees |
-| Testing                    | Go `testing`                                                 |
-| Race detection             | `go test -race`                                              |
-| Audit storage              | To be determined                                             |
-| CI                         | To be determined                                             |
-
-`container/heap` remains a candidate for the in-memory representation, but the final data structure will depend on how reassessment, persistence, and concurrent assignment are implemented.
+Optional adapters or examples may be added later (e.g. a PostgreSQL-backed host, an HTTP API), but they must not contaminate the queue core.
 
 ---
 
@@ -470,149 +406,112 @@ Future work may investigate queue-aging or alerting policies, but those mechanis
 
 ```text
 triage-queue/
-├── cmd/
-│   └── triage/
-│       └── # application entrypoint
 │
-├── internal/
-│   ├── queue/
-│   │   └── # deterministic queue ordering
-│   │
-│   ├── domain/
-│   │   └── # patients, triage categories, states, assignments
-│   │
-│   ├── engine/
-│   │   └── # queue orchestration and state transitions
-│   │
-│   ├── api/
-│   │   └── # HTTP handlers
-│   │
-│   ├── storage/
-│   │   └── # PostgreSQL persistence
-│   │
-│   └── audit/
-│       └── # audit/event history
+├── queue/
+│   ├── queue.go
+│   ├── entry.go
+│   ├── priority.go
+│   ├── assignment.go
+│   ├── events.go
+│   ├── errors.go
+│   └── queue_test.go
+│
+├── triage/
+│   └── sats.go
+│
+├── examples/
+│   └── emergency-department/
+│       └── main.go
 │
 ├── docs/
-│   ├── adr/
-│   │   └── # Architecture Decision Records
-│   │
-│   └── TRIAGE_POLICY.md
-│       └── # documented boundary between clinical input and queue policy
+│   └── adr/
 │
 ├── go.mod
-└── README.md
+├── README.md
+└── LICENSE
 ```
 
-No code has been written for the above structure yet.
+This structure is illustrative rather than final. No code has been written yet.
 
 ---
 
 # Roadmap
 
-## Phase 0 — Define the Domain and Invariants
+## Phase 0 — Domain and Invariants
 
-* [ ] Document the selected clinical triage framework
-* [ ] Define supported SATS categories
-* [ ] Define the clinical/software responsibility boundary
-* [ ] Define patient workflow states
+* [ ] Define `Entry`, `Priority`, `Sequence`
 * [ ] Define queue eligibility
-* [ ] Define the initial queue-ordering rules
-* [ ] Document queue invariants
+* [ ] Define assignment semantics
+* [ ] Define ordering invariants (Q1–Q6 above)
+* [ ] Define immutable event semantics
+* [ ] Define the queue/host responsibility boundary
 * [ ] Record important design decisions as ADRs
 
 ---
 
-## Phase 1 — Pure Queue Engine
+## Phase 1 — Pure Deterministic Queue
 
-* [ ] Represent triage categories as domain types
-* [ ] Implement clinical-priority ordering
-* [ ] Implement FIFO ordering within equal categories
-* [ ] Implement deterministic `NextPatient` behavior
-* [ ] Keep queue logic independent of HTTP and PostgreSQL
-* [ ] Unit-test ordering rules
-* [ ] Test edge cases and invalid state transitions
+* [ ] Implement `AddEntry`
+* [ ] Implement ordering by priority
+* [ ] Implement FIFO/sequence tie-breaking
+* [ ] Implement `Peek`, if useful
+* [ ] Implement `RemoveEntry`
+* [ ] Unit tests for ordering rules
 
----
-
-## Phase 2 — Reassessment
-
-* [ ] Support externally submitted clinical reassessments
-* [ ] Reorder waiting patients after reassessment
-* [ ] Preserve previous assessment information
-* [ ] Test upward and downward category changes
-* [ ] Ensure reassessment does not create duplicate queue entries
+No database. No API. No HTTP.
 
 ---
 
-## Phase 3 — Concurrent Assignment
+## Phase 2 — Priority Changes
 
-* [ ] Support simultaneous requests for the next patient
-* [ ] Prevent duplicate patient assignment
-* [ ] Define atomic assignment semantics
-* [ ] Run concurrent stress tests
-* [ ] Run Go race-detector tests
-* [ ] Verify assignment invariants under randomized load
-
----
-
-## Phase 4 — Persistence and Audit Trail
-
-* [ ] Finalize persistence architecture
-* [ ] Persist patients and queue state in PostgreSQL
-* [ ] Persist assignments
-* [ ] Persist reassessments
-* [ ] Maintain immutable audit information
-* [ ] Define transaction boundaries
-* [ ] Define retry/idempotency behavior
-* [ ] Verify recovery after application restart
+* [ ] Implement `UpdatePriority`
+* [ ] Implement queue reordering
+* [ ] Emit `PriorityChanged` events
+* [ ] Test promotion and demotion
+* [ ] Ensure no duplicate queue entries are created
 
 ---
 
-## Phase 5 — Multi-Instance Concurrency
+## Phase 3 — Assignment
 
-* [ ] Run multiple application instances against the same database
-* [ ] Ensure two servers cannot claim the same patient
-* [ ] Test database locking/claim strategy
-* [ ] Simulate simultaneous assignment requests at scale
-
----
-
-## Phase 6 — API Layer
-
-* [ ] Patient intake endpoint
-* [ ] Triage-category submission endpoint
-* [ ] Reassessment endpoint
-* [ ] Next-patient assignment endpoint
-* [ ] Patient-state transition endpoints
-* [ ] Administrative endpoints
-* [ ] Authentication
-* [ ] Authorization
+* [ ] Implement atomic `AssignNext`
+* [ ] Remove assigned entries from the active queue
+* [ ] Emit immutable `AssignmentCreated` events
+* [ ] Prevent duplicate assignment
+* [ ] Concurrency tests
 
 ---
 
-## Phase 7 — Resilience Testing
+## Phase 4 — In-Memory Concurrency
 
-* [ ] Simulated application crashes
-* [ ] Simulated database failures
-* [ ] Network interruption tests
-* [ ] Retry and duplicate-request testing
-* [ ] High-volume load testing
-* [ ] State-recovery testing
+* [ ] Test simultaneous `AssignNext` calls
+* [ ] Verify synchronization correctness
+* [ ] Randomized load testing
+* [ ] Go race detector (`go test -race`)
+* [ ] Verify queue invariants hold under load
 
 ---
 
-## Phase 8 — Observability
+## Phase 5 — Event and Recovery Contract
 
-* [ ] Queue-length metrics
-* [ ] Waiting-time metrics
-* [ ] Number of patients by triage category
-* [ ] Reassessment metrics
-* [ ] Assignment latency
-* [ ] Failed-assignment metrics
-* [ ] Structured logging
-* [ ] Distributed tracing
-* [ ] Alerts for abnormal conditions
+* [ ] Define immutable event interfaces
+* [ ] Define event application/replay, if appropriate
+* [ ] Define idempotency semantics
+* [ ] Define command retry behavior
+* [ ] Define host persistence expectations
+
+---
+
+## Phase 6 — Integration Examples
+
+Only after the core is solid, demonstrate how an external application might:
+
+* [ ] persist events
+* [ ] expose HTTP endpoints
+* [ ] use PostgreSQL
+* [ ] integrate with a clinical system
+
+These are examples/adapters, not requirements of the queue core.
 
 ---
 
@@ -623,37 +522,28 @@ The following ideas are deliberately outside the first implementation:
 * queue-aging policies;
 * waiting-time alerts;
 * configurable institutional queue policies;
-* multiple treatment areas;
-* specialty-specific queues;
-* clinician availability;
-* resource constraints;
-* pre-hospital integration;
-* distributed event processing;
-* event-sourced persistence;
+* multiple treatment areas or specialty-specific queues;
+* clinician/assignee availability and resource constraints;
+* distributed multi-instance coordination;
+* event-sourced persistence and full replay support;
 * queue-policy simulation and comparison.
 
-Any feature that changes or interprets **clinical urgency** must remain clearly separated from ordinary queue-management logic and would require appropriate clinical validation before being treated as anything more than an engineering simulation.
+Any feature that would let the queue engine interpret or infer domain-specific urgency (e.g. clinical urgency) on its own must remain clearly out of scope for the core — priorities are always supplied by the host application.
 
 ---
 
 ## Running It
 
-No runnable code exists yet.
-
-Instructions will be added once the first implementation phase is complete.
+No runnable code exists yet. Instructions will be added once the first implementation phase is complete.
 
 ---
 
 ## Disclaimer
 
-This repository is an engineering project exploring concurrent, auditable, and fault-tolerant priority-queue design using emergency-department triage as the driving scenario.
+This repository is an engineering project exploring a deterministic, concurrent, auditable priority-assignment queue engine, using emergency-department triage as the driving example.
 
-It is **not a medical device**.
+It is **not a medical device** and is not a patient-management, hospital, or clinical decision system.
 
-It does not diagnose patients, independently determine clinical urgency, or replace the judgment of trained healthcare professionals.
+It does not diagnose, does not determine clinical urgency, and does not replace the judgment of trained healthcare professionals or any other domain expert. Any priority used by the engine is assumed to have been supplied by an external, appropriately authorized process.
 
-Any triage category used by the system is assumed to have been supplied through an appropriate clinical process.
-
-The software described in this repository is not intended for deployment in a clinical environment.
-
-A real-world healthcare deployment would require clinical validation, appropriate governance, security and privacy controls, regulatory review where applicable, integration with institutional workflows, and compliance with relevant healthcare and data-protection requirements.
+The software described in this repository is not intended for deployment in a clinical environment on its own. A real-world healthcare deployment built on top of this engine would require clinical validation, appropriate governance, security and privacy controls, regulatory review where applicable, integration with institutional workflows, and compliance with relevant healthcare and data-protection requirements — all of which are the responsibility of the host application, not this repository.
