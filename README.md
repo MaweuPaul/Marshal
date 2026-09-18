@@ -51,20 +51,75 @@ The host application decides what an entry ID represents, what an assignee ID re
 
 ## Reference Domain: Emergency-Department Triage
 
-Emergency departments do not normally treat patients strictly on a first-come-first-served basis. Patients are clinically assessed by trained healthcare professionals and assigned a triage category representing the urgency of their condition.
+Emergency departments do not normally treat patients strictly on a first-come-first-served basis. Patients are clinically assessed by trained healthcare professionals and assigned a triage priority representing the urgency of their condition.
 
-The reference model is the **South African Triage Scale (SATS)**, which maps to queue priority as follows:
+### Numeric priority, not fixed categories
 
-| SATS Category | General Meaning | Queue Priority |
-| -------------- | ---------------- | -------------- |
-| Red            | Emergency         | 1              |
-| Orange         | Very urgent       | 2              |
-| Yellow         | Urgent            | 3              |
-| Green          | Routine           | 4              |
+The queue is **not** hard-coded to categories such as `Red` / `Orange` / `Yellow` / `Green`. Instead, it works with **numeric triage priorities**, where a smaller number means greater urgency:
 
-A trained clinical professional, or an external clinical system, determines the triage category. The queue engine receives the resulting priority. It does **not** determine why the priority was assigned, does not interpret symptoms, and does not increase priority merely because time has passed.
+```text
+1 = highest priority (most urgent)
+...
+7 = lowest priority (least urgent)
+```
 
-This mapping lives in a small triage-specific layer (`triage/sats.go`) that sits outside the core queue package — the core `queue` package operates on `Priority`, never on clinical terminology.
+The initial planned range is **1 through 7**, but this is a convention of the reference triage layer, not a limit the engine enforces. The engine only needs to understand ordering:
+
+```text
+1 < 2 < 3 < 4 < 5 < 6 < 7
+```
+
+The meaning of each number — what clinical condition maps to `Priority 2` vs `Priority 5` — is decided entirely by the clinical framework or institution using the system, not by this repository. See [Priority Is Host-Defined, Not Fixed by the Engine](#priority-is-host-defined-not-fixed-by-the-engine).
+
+Because the engine only compares priority values, it remains generic enough to support institutions with fewer or more levels without any change to the ordering logic:
+
+```text
+Hospital A → priorities 1–4
+Hospital B → priorities 1–5
+Hospital C → priorities 1–7
+```
+
+A trained clinical professional, or an external clinical system, determines the priority. The queue engine receives the resulting number. It does **not** determine why that priority was assigned, does not interpret symptoms, and does not increase priority merely because time has passed.
+
+A reference mapping — for example the **South African Triage Scale (SATS)** — can live in a small triage-specific layer (`triage/sats.go`) that sits outside the core queue package, translating clinical categories into numeric priorities:
+
+```text
+SATS Category    Queue Priority
+Red         →    1
+Orange      →    2
+Yellow      →    3
+Green       →    4
+```
+
+The core `queue` package never sees `"Red"` or `"Green"` — it only ever operates on `Priority` (a comparable numeric value).
+
+### Example: priority changes through reassessment
+
+A patient's priority may change while they are waiting, because a trained clinician reassesses them — not because time has passed. For example, given the waiting queue:
+
+```text
+P101 → Priority 1
+P102 → Priority 3
+P103 → Priority 5
+P104 → Priority 6
+```
+
+a clinician reassesses `P103` and its priority changes from `5` to `2`:
+
+```text
+P103: Priority 5 → Priority 2
+```
+
+The queue immediately reflects the new priority:
+
+```text
+P101 → Priority 1
+P103 → Priority 2
+P102 → Priority 3
+P104 → Priority 6
+```
+
+The clinician changed the priority; the software only enforced the resulting order. The engine does not decide *that* `P103` became more urgent — it only reacts, deterministically, to the `UpdatePriority` command it was given.
 
 ---
 
@@ -181,6 +236,16 @@ Where two eligible entries have the same priority, the entry with the earlier qu
 priority
   → sequence
 ```
+
+### Initial Queue Ordering Policy
+
+For two eligible waiting entries `A` and `B`, the first version uses a simple, fully deterministic rule:
+
+1. Compare priority. Lower numeric priority wins.
+2. If both entries have the same priority, compare queue-entry sequence.
+3. The entry with the earlier sequence comes first.
+
+A monotonically increasing sequence number is assigned to every entry as it is added, so sequence values are always unique — two entries can never tie on both priority and sequence. This keeps ordering fully deterministic without needing a further tie-breaker.
 
 A monotonically increasing queue sequence is used as the tie-breaker rather than relying solely on timestamps, since two entries could theoretically share an identical timestamp. The queue core is deterministic: given identical state and commands, it makes the same ordering decision every time.
 
