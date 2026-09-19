@@ -20,7 +20,7 @@ import (
 // package.
 type heapItem struct {
 	entry *Entry
-	index int
+	pos   int // current position of this item within entryHeap
 }
 
 // entryHeap orders waiting entries by priority, then by sequence — the
@@ -38,13 +38,13 @@ func (h entryHeap) Less(i, j int) bool {
 
 func (h entryHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
-	h[i].index = i
-	h[j].index = j
+	h[i].pos = i
+	h[j].pos = j
 }
 
 func (h *entryHeap) Push(x any) {
 	item := x.(*heapItem)
-	item.index = len(*h)
+	item.pos = len(*h)
 	*h = append(*h, item)
 }
 
@@ -53,7 +53,7 @@ func (h *entryHeap) Pop() any {
 	n := len(old)
 	item := old[n-1]
 	old[n-1] = nil
-	item.index = -1
+	item.pos = -1
 	*h = old[:n-1]
 	return item
 }
@@ -126,7 +126,7 @@ func (q *Queue) UpdatePriority(id EntryID, newPriority Priority) (PriorityChange
 
 	old := item.entry.Priority
 	item.entry.Priority = newPriority
-	heap.Fix(&q.waiting, item.index)
+	heap.Fix(&q.waiting, item.pos)
 
 	return PriorityChanged{
 		EntryID:     id,
@@ -152,7 +152,7 @@ func (q *Queue) RemoveEntry(id EntryID) (EntryRemoved, error) {
 		return EntryRemoved{}, ErrEntryNotFound
 	}
 
-	heap.Remove(&q.waiting, item.index)
+	heap.Remove(&q.waiting, item.pos)
 	delete(q.index, id)
 
 	return EntryRemoved{EntryID: id, OccurredAt: q.now()}, nil
