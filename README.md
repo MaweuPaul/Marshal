@@ -588,24 +588,24 @@ This structure is illustrative rather than final. No code has been written yet.
 
 ## Phase 0 — Domain and Invariants
 
-* [ ] Define `Entry`, `Priority` (rank), `Sequence`
-* [ ] Define queue eligibility
-* [ ] Define assignment semantics
-* [ ] Define ordering invariants (Q1–Q6 above)
-* [ ] Define immutable event semantics
-* [ ] Define the queue/host responsibility boundary
+* [x] Define `Entry`, `Priority` (rank), `Sequence`
+* [x] Define queue eligibility
+* [x] Define assignment semantics
+* [x] Define ordering invariants (Q1–Q6 above)
+* [x] Define immutable event semantics
+* [x] Define the queue/host responsibility boundary
 * [ ] Record important design decisions as ADRs
 
 ---
 
 ## Phase 1 — Pure Deterministic Queue
 
-* [ ] Implement `AddEntry`
-* [ ] Implement ordering by priority
-* [ ] Implement FIFO/sequence tie-breaking
-* [ ] Implement `Peek`, if useful
-* [ ] Implement `RemoveEntry`
-* [ ] Unit tests for ordering rules
+* [x] Implement `AddEntry`
+* [x] Implement ordering by priority
+* [x] Implement FIFO/sequence tie-breaking
+* [x] Implement `Peek`, if useful
+* [x] Implement `RemoveEntry`
+* [x] Unit tests for ordering rules
 
 No database. No API. No HTTP.
 
@@ -613,11 +613,11 @@ No database. No API. No HTTP.
 
 ## Phase 2 — Priority Changes
 
-* [ ] Implement `UpdatePriority`
-* [ ] Implement queue reordering
-* [ ] Emit `PriorityChanged` events
-* [ ] Test promotion and demotion
-* [ ] Ensure no duplicate queue entries are created
+* [x] Implement `UpdatePriority`
+* [x] Implement queue reordering
+* [x] Emit `PriorityChanged` events
+* [x] Test promotion and demotion
+* [x] Ensure no duplicate queue entries are created
 
 ---
 
