@@ -10,7 +10,7 @@ The engine is designed to answer one core question correctly, even under concurr
 
 Emergency triage remains the motivating example and explains why this engine exists, but the queue engine itself does **not** store or understand patient information. It operates on opaque entry and assignee identifiers, externally supplied priorities, and queue-relevant facts — nothing more.
 
-> **Status:** Planning stage. Nothing in this repository has been implemented yet. Everything below describes the intended design and current design decisions, not existing functionality. See [Disclaimer](#disclaimer).
+> **Status:** Core engine implemented (Phases 0–4 of the [roadmap](#roadmap) below): `AddEntry`, `UpdatePriority`, `RemoveEntry`, `AssignNext`, `CancelAssignment`, and `Reassign`, all covered by tests including a concurrency stress test and CI-enforced race detection. See [Running It](#running-it) to try it. Integration examples (Phase 6 — persistence, HTTP, etc.) are not built yet. See [Disclaimer](#disclaimer).
 
 ---
 
@@ -691,7 +691,16 @@ Any feature that would let the queue engine interpret or infer domain-specific u
 
 ## Running It
 
-No runnable code exists yet. Instructions will be added once the first implementation phase is complete.
+```bash
+git clone https://github.com/MaweuPaul/Marshal.git
+cd Marshal
+
+go test ./...              # run the test suite
+go test ./... -race        # with the race detector (requires cgo/a C toolchain)
+go run ./examples/emergency-department   # runnable usage example
+```
+
+The engine itself (`queue` package) has no external dependencies — `go.mod` declares none.
 
 ---
 
