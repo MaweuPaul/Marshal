@@ -52,9 +52,27 @@ func main() {
 	}
 	fmt.Printf("reassessed %-8s rank %d -> %d\n", change.EntryID, change.OldPriority, change.NewPriority)
 
+	// doctor-1 is offered the most urgent patient, but gets pulled away
+	// before treating them — the assignment is cancelled. patient-a
+	// returns to the waiting queue at its ORIGINAL priority and
+	// sequence, so it does not lose its place to patient-d, which is
+	// also rank 1 but arrived later.
+	first, _, err := q.AssignNext("doctor-1")
+	if err != nil {
+		log.Fatalf("AssignNext: %v", err)
+	}
+	fmt.Printf("assigned   %-8s rank=%d sequence=%d to=%s\n",
+		first.EntryID, first.PriorityAtAssignment, first.Sequence, first.AssigneeID)
+
+	cancelled, err := q.CancelAssignment(first.EntryID)
+	if err != nil {
+		log.Fatalf("CancelAssignment: %v", err)
+	}
+	fmt.Printf("cancelled  %-8s was assigned to=%s\n", cancelled.EntryID, cancelled.AssigneeID)
+
 	fmt.Println("\nassignment order:")
 	for {
-		assignment, _, err := q.AssignNext("doctor-1")
+		assignment, _, err := q.AssignNext("doctor-2")
 		if err != nil {
 			break
 		}
