@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"sync"
 	"testing"
-	"time"
 )
 
 func TestAddEntryOrdersByPriorityThenSequence(t *testing.T) {
@@ -257,7 +256,10 @@ func TestAssignNextConcurrentCallersNeverDuplicate(t *testing.T) {
 // claimed, and the queue ends up empty.
 func TestRandomizedConcurrentLoad(t *testing.T) {
 	q := New()
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	// Deliberately using the package-level rand.Intn (not a private
+	// rand.New(...) instance) here: the top-level functions share a
+	// source guarded by an internal mutex, so they're safe to call
+	// from many goroutines at once. A private *rand.Rand is not.
 
 	const n = 1000
 	const addWorkers = 10
@@ -284,7 +286,7 @@ func TestRandomizedConcurrentLoad(t *testing.T) {
 			<-addStartDone(&addStart)
 			for i := 0; i < perWorker; i++ {
 				id := entryID(worker*perWorker + i)
-				priority := Priority(rng.Intn(7))
+				priority := Priority(rand.Intn(7))
 				if _, err := q.AddEntry(id, priority); err != nil {
 					t.Errorf("AddEntry(%s, %d) error = %v", id, priority, err)
 					continue
@@ -292,7 +294,7 @@ func TestRandomizedConcurrentLoad(t *testing.T) {
 				addedMu.Lock()
 				added = append(added, id)
 				addedMu.Unlock()
-				if rng.Intn(4) == 0 {
+				if rand.Intn(4) == 0 {
 					runtime.Gosched()
 				}
 			}
@@ -318,16 +320,16 @@ func TestRandomizedConcurrentLoad(t *testing.T) {
 			n := len(added)
 			var id EntryID
 			if n > 0 {
-				id = added[rng.Intn(n)]
+				id = added[rand.Intn(n)]
 			}
 			addedMu.Unlock()
 			if id != "" {
 				// Ignore the error: id may have already been assigned
 				// by the time this runs, which is a valid outcome, not
 				// a bug.
-				_, _ = q.UpdatePriority(id, Priority(rng.Intn(7)))
+				_, _ = q.UpdatePriority(id, Priority(rand.Intn(7)))
 			}
-			if rng.Intn(3) == 0 {
+			if rand.Intn(3) == 0 {
 				runtime.Gosched()
 			}
 		}
