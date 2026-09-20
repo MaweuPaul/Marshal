@@ -594,7 +594,7 @@ This structure is illustrative rather than final. No code has been written yet.
 * [x] Define ordering invariants (Q1–Q6 above)
 * [x] Define immutable event semantics
 * [x] Define the queue/host responsibility boundary
-* [ ] Record important design decisions as ADRs
+* [x] Record important design decisions as ADRs
 
 ---
 
