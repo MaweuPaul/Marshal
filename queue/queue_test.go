@@ -3,8 +3,11 @@ package queue
 import (
 	"errors"
 	"fmt"
+	"math/rand"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestAddEntryOrdersByPriorityThenSequence(t *testing.T) {
@@ -243,6 +246,149 @@ func TestAssignNextConcurrentCallersNeverDuplicate(t *testing.T) {
 	if q.Len() != 0 {
 		t.Fatalf("Len() = %d after draining, want 0", q.Len())
 	}
+}
+
+// TestRandomizedConcurrentLoad hammers the queue with many goroutines
+// doing a random mix of adds, priority updates, and assignments, with
+// randomized timing between operations. It doesn't assert a specific
+// order (random input makes that meaningless) — it asserts the
+// invariants that must hold no matter what order things happened in:
+// every entry is claimed at most once, every added entry is eventually
+// claimed, and the queue ends up empty.
+func TestRandomizedConcurrentLoad(t *testing.T) {
+	q := New()
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	const n = 1000
+	const addWorkers = 10
+	const assignWorkers = 15
+
+	var (
+		wg       sync.WaitGroup
+		addedMu  sync.Mutex
+		added    []EntryID
+		claimMu  sync.Mutex
+		claimed  = make(map[EntryID]int)
+		addStart sync.WaitGroup
+	)
+	addStart.Add(1)
+
+	// Concurrently add n entries with random priorities and random
+	// jitter between them, so the order and timing of arrivals varies
+	// from run to run.
+	wg.Add(addWorkers)
+	perWorker := n / addWorkers
+	for w := 0; w < addWorkers; w++ {
+		go func(worker int) {
+			defer wg.Done()
+			<-addStartDone(&addStart)
+			for i := 0; i < perWorker; i++ {
+				id := entryID(worker*perWorker + i)
+				priority := Priority(rng.Intn(7))
+				if _, err := q.AddEntry(id, priority); err != nil {
+					t.Errorf("AddEntry(%s, %d) error = %v", id, priority, err)
+					continue
+				}
+				addedMu.Lock()
+				added = append(added, id)
+				addedMu.Unlock()
+				if rng.Intn(4) == 0 {
+					runtime.Gosched()
+				}
+			}
+		}(w)
+	}
+	addStart.Done()
+
+	// Concurrently reassess random already-added entries while adding
+	// is still happening — a real host could reassess an entry the
+	// instant after it arrives.
+	stopReassessing := make(chan struct{})
+	var reassessWg sync.WaitGroup
+	reassessWg.Add(1)
+	go func() {
+		defer reassessWg.Done()
+		for {
+			select {
+			case <-stopReassessing:
+				return
+			default:
+			}
+			addedMu.Lock()
+			n := len(added)
+			var id EntryID
+			if n > 0 {
+				id = added[rng.Intn(n)]
+			}
+			addedMu.Unlock()
+			if id != "" {
+				// Ignore the error: id may have already been assigned
+				// by the time this runs, which is a valid outcome, not
+				// a bug.
+				_, _ = q.UpdatePriority(id, Priority(rng.Intn(7)))
+			}
+			if rng.Intn(3) == 0 {
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Concurrently drain via AssignNext until every added entry has
+	// been claimed exactly once.
+	wg.Add(assignWorkers)
+	for w := 0; w < assignWorkers; w++ {
+		go func(worker int) {
+			defer wg.Done()
+			for {
+				claimMu.Lock()
+				done := len(claimed) >= n
+				claimMu.Unlock()
+				if done {
+					return
+				}
+				assignment, _, err := q.AssignNext(AssigneeID(entryID(worker)))
+				if errors.Is(err, ErrEmptyQueue) {
+					runtime.Gosched()
+					continue
+				}
+				if err != nil {
+					t.Errorf("AssignNext() unexpected error = %v", err)
+					return
+				}
+				claimMu.Lock()
+				claimed[assignment.EntryID]++
+				claimMu.Unlock()
+			}
+		}(w)
+	}
+
+	wg.Wait()
+	close(stopReassessing)
+	reassessWg.Wait()
+
+	if len(claimed) != n {
+		t.Fatalf("claimed %d distinct entries, want %d", len(claimed), n)
+	}
+	for id, count := range claimed {
+		if count != 1 {
+			t.Fatalf("entry %s claimed %d times, want exactly 1", id, count)
+		}
+	}
+	if got := q.Len(); got != 0 {
+		t.Fatalf("Len() = %d after draining, want 0", got)
+	}
+}
+
+// addStartDone returns a channel that closes once wg's Done has been
+// called, letting add-worker goroutines all start racing at once
+// instead of trickling in as they're spawned.
+func addStartDone(wg *sync.WaitGroup) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done
 }
 
 func mustAdd(t *testing.T, q *Queue, id EntryID, priority Priority) {

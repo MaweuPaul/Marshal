@@ -623,21 +623,21 @@ No database. No API. No HTTP.
 
 ## Phase 3 — Assignment
 
-* [ ] Implement atomic `AssignNext`
-* [ ] Remove assigned entries from the active queue
-* [ ] Emit immutable `AssignmentCreated` events
-* [ ] Prevent duplicate assignment
-* [ ] Concurrency tests
+* [x] Implement atomic `AssignNext`
+* [x] Remove assigned entries from the active queue
+* [x] Emit immutable `AssignmentCreated` events
+* [x] Prevent duplicate assignment
+* [x] Concurrency tests
 
 ---
 
 ## Phase 4 — In-Memory Concurrency
 
-* [ ] Test simultaneous `AssignNext` calls
-* [ ] Verify synchronization correctness
-* [ ] Randomized load testing
-* [ ] Go race detector (`go test -race`)
-* [ ] Verify queue invariants hold under load
+* [x] Test simultaneous `AssignNext` calls
+* [x] Verify synchronization correctness
+* [x] Randomized load testing
+* [x] Go race detector (`go test -race`)
+* [x] Verify queue invariants hold under load
 
 ---
 
