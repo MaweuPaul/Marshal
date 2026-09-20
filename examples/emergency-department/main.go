@@ -52,12 +52,25 @@ func main() {
 	}
 	fmt.Printf("reassessed %-8s rank %d -> %d\n", change.EntryID, change.OldPriority, change.NewPriority)
 
+	// AssignNext requires a non-empty commandID identifying this logical
+	// attempt: retrying AssignNext isn't safe on its own (a retry would
+	// claim a different entry), so replaying the same commandID instead
+	// returns the original result. A real host would derive this from
+	// its own request/retry identifier; here it's just a counter.
+	nextCommandID := func() func() string {
+		n := 0
+		return func() string {
+			n++
+			return fmt.Sprintf("cmd-%d", n)
+		}
+	}()
+
 	// doctor-1 is offered the most urgent patient, but gets pulled away
 	// before treating them — the assignment is cancelled. patient-a
 	// returns to the waiting queue at its ORIGINAL priority and
 	// sequence, so it does not lose its place to patient-d, which is
 	// also rank 1 but arrived later.
-	first, _, err := q.AssignNext("doctor-1")
+	first, _, err := q.AssignNext("doctor-1", nextCommandID())
 	if err != nil {
 		log.Fatalf("AssignNext: %v", err)
 	}
@@ -72,7 +85,7 @@ func main() {
 
 	fmt.Println("\nassignment order:")
 	for {
-		assignment, _, err := q.AssignNext("doctor-2")
+		assignment, _, err := q.AssignNext("doctor-2", nextCommandID())
 		if err != nil {
 			break
 		}

@@ -358,7 +358,7 @@ because there is a race window between selecting and assigning the entry — two
 Instead, the engine exposes a single atomic operation:
 
 ```go
-assignment, events, err := queue.AssignNext(assigneeID)
+assignment, event, err := queue.AssignNext(assigneeID, commandID)
 ```
 
 Conceptually, this operation:
@@ -367,7 +367,9 @@ Conceptually, this operation:
 2. claims that entry atomically;
 3. removes it from active waiting eligibility;
 4. creates the immutable assignment fact;
-5. returns the resulting event(s).
+5. returns the resulting event.
+
+`commandID` is required and non-empty — see [Identity, idempotency, and recovery contract](#identity-idempotency-and-recovery-contract): retrying `AssignNext` isn't safe on its own (a retry would claim a *different* entry), so the caller supplies a stable ID for the logical attempt, and replaying the same ID returns the original result instead of claiming again.
 
 ---
 
@@ -415,6 +417,7 @@ These are illustrative, not a final Go API:
 
 ```go
 type EntryAdded struct {
+    EventSeq   uint64 // total order across all events; see ADR 0003
     EntryID    EntryID
     Priority   Priority
     Sequence   uint64
@@ -422,6 +425,7 @@ type EntryAdded struct {
 }
 
 type PriorityChanged struct {
+    EventSeq    uint64
     EntryID     EntryID
     OldPriority Priority
     NewPriority Priority
@@ -429,6 +433,7 @@ type PriorityChanged struct {
 }
 
 type AssignmentCreated struct {
+    EventSeq             uint64
     EntryID              EntryID
     AssigneeID           AssigneeID
     PriorityAtAssignment Priority
@@ -499,9 +504,9 @@ for _, event := range storedEvents {
 
 This is a **potential future capability**, not a version-1 requirement. This project does not present itself as a complete event-sourced architecture at this stage — the goal for v1 is simple immutable events and a clean integration boundary, not full event sourcing.
 
-### Open integration question (future design work)
+### Identity, idempotency, and recovery contract
 
-External persistence introduces consistency questions that remain open, for example:
+External persistence introduces consistency questions, for example:
 
 ```text
 1. engine assigns entry
@@ -509,7 +514,12 @@ External persistence introduces consistency questions that remain open, for exam
 3. host crashes before persisting event
 ```
 
-The eventual integration contract must define how persistence, retries, idempotency, and recovery work. This is deliberately left as future design work rather than solved by baking a specific database into the core.
+These are answered explicitly in [ADR 0003](docs/adr/0003-identity-idempotency-and-recovery-contract.md). Summary:
+
+- **Identity.** Every event carries an `EventSeq uint64` — a single, strictly increasing counter across the whole queue, assigned under the same lock that already serializes every command. Assignments are identified by `EntryID` while active (Q3: at most one at a time).
+- **Retry safety.** Auditing each command: `UpdatePriority` and `Reassign` are safe to retry (same end state, though each retry emits a redundant event); `RemoveEntry` and `CancelAssignment` return a distinguishable "already done" error on retry. `AssignNext` is the one command where a retry is **not** safe — it doesn't repeat the previous effect, it claims a *different* entry. `AssignNext` therefore requires a non-empty `commandID string`: replaying the same `commandID` returns the original result instead of claiming again, and an empty `commandID` is rejected outright (`ErrEmptyCommandID`) rather than silently allowing the unsafe path.
+- **Restart and crash recovery.** Engine memory is not durable — this hasn't changed, and won't (persistence stays the host's job). The `commandID` cache protects against retries *within a process's lifetime*, not across a crash. Across a restart, correctness depends entirely on the host persisting events before treating them as committed, and replaying its own stored state — this repository doesn't provide an `Apply(event)` replay mechanism yet (see [Event replay](#event-replay-future-direction) below), but `EventSeq` exists now specifically so replay logic has a stable ordinal to key off of later, without another breaking change.
+- **Authoritative state.** Engine memory is authoritative for live, in-process decisions (it's the only thing enforcing Q1–Q6 in real time). The host's persisted event log is authoritative for recovery and audit once that process is gone. These answer different questions — neither overrides the other.
 
 ---
 

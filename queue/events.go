@@ -11,6 +11,7 @@ type Event interface {
 
 // EntryAdded is emitted when a new entry joins the waiting queue.
 type EntryAdded struct {
+	EventSeq   uint64
 	EntryID    EntryID
 	Priority   Priority
 	Sequence   uint64
@@ -21,6 +22,7 @@ type EntryAdded struct {
 // queue records that the priority changed and reorders accordingly; it
 // does not record, or need to know, why.
 type PriorityChanged struct {
+	EventSeq    uint64
 	EntryID     EntryID
 	OldPriority Priority
 	NewPriority Priority
@@ -30,6 +32,7 @@ type PriorityChanged struct {
 // EntryRemoved is emitted when an entry is removed from the queue
 // without being assigned.
 type EntryRemoved struct {
+	EventSeq   uint64
 	EntryID    EntryID
 	OccurredAt time.Time
 }
@@ -37,6 +40,7 @@ type EntryRemoved struct {
 // AssignmentCreated is emitted when an entry is atomically claimed by
 // AssignNext. It mirrors the resulting Assignment as an event.
 type AssignmentCreated struct {
+	EventSeq             uint64
 	EntryID              EntryID
 	AssigneeID           AssigneeID
 	PriorityAtAssignment Priority
@@ -51,6 +55,7 @@ type AssignmentCreated struct {
 // AssignmentCreated fact this cancels is never edited; this is a new,
 // separate event appended after it.
 type AssignmentCancelled struct {
+	EventSeq   uint64
 	EntryID    EntryID
 	AssigneeID AssigneeID
 	OccurredAt time.Time
@@ -63,6 +68,7 @@ type AssignmentCancelled struct {
 // AssignmentCreated fact this follows is never edited; this is a new,
 // separate event appended after it.
 type AssignmentReassigned struct {
+	EventSeq      uint64
 	EntryID       EntryID
 	OldAssigneeID AssigneeID
 	NewAssigneeID AssigneeID

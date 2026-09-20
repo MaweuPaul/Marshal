@@ -58,24 +58,53 @@ func (h *entryHeap) Pop() any {
 	return item
 }
 
+// maxCommandHistory bounds the AssignNext idempotency cache. Retries
+// are deduplicated within this many most-recent AssignNext calls; a
+// commandID replayed after being evicted is treated as new. This is a
+// bounded "idempotency window," not unbounded request storage — see
+// ADR 0003.
+var maxCommandHistory = 10_000
+
+// assignNextResult is the cached result of a completed AssignNext call,
+// keyed by the caller-supplied commandID.
+type assignNextResult struct {
+	assignment Assignment
+	event      AssignmentCreated
+}
+
 // Queue is a deterministic, concurrency-safe priority-assignment queue.
 // The zero value is not usable — construct one with New.
 type Queue struct {
-	mu       sync.Mutex
-	waiting  entryHeap              // ordered by priority then sequence
-	index    map[EntryID]*heapItem  // fast lookup into waiting
-	assigned map[EntryID]Assignment // active assignments
-	nextSeq  uint64
-	now      func() time.Time
+	mu           sync.Mutex
+	waiting      entryHeap              // ordered by priority then sequence
+	index        map[EntryID]*heapItem  // fast lookup into waiting
+	assigned     map[EntryID]Assignment // active assignments
+	nextSeq      uint64                 // next Entry.Sequence (arrival order)
+	nextEventSeq uint64                 // next Event.EventSeq (emission order)
+	now          func() time.Time
+
+	// commandResults/commandOrder implement AssignNext's idempotency
+	// cache: a bounded FIFO of the most recent commandIDs seen, so a
+	// retried AssignNext(assigneeID, commandID) returns the original
+	// result instead of claiming a different entry. See ADR 0003.
+	commandResults map[string]assignNextResult
+	commandOrder   []string
 }
 
 // New returns an empty Queue.
 func New() *Queue {
 	return &Queue{
-		index:    make(map[EntryID]*heapItem),
-		assigned: make(map[EntryID]Assignment),
-		now:      time.Now,
+		index:          make(map[EntryID]*heapItem),
+		assigned:       make(map[EntryID]Assignment),
+		now:            time.Now,
+		commandResults: make(map[string]assignNextResult),
 	}
+}
+
+// newEventSeq returns the next EventSeq value. Callers must hold q.mu.
+func (q *Queue) newEventSeq() uint64 {
+	q.nextEventSeq++
+	return q.nextEventSeq
 }
 
 // AddEntry adds a new waiting entry with the given priority (rank) and
@@ -101,6 +130,7 @@ func (q *Queue) AddEntry(id EntryID, priority Priority) (EntryAdded, error) {
 	q.index[id] = item
 
 	return EntryAdded{
+		EventSeq:   q.newEventSeq(),
 		EntryID:    id,
 		Priority:   priority,
 		Sequence:   seq,
@@ -129,6 +159,7 @@ func (q *Queue) UpdatePriority(id EntryID, newPriority Priority) (PriorityChange
 	heap.Fix(&q.waiting, item.pos)
 
 	return PriorityChanged{
+		EventSeq:    q.newEventSeq(),
 		EntryID:     id,
 		OldPriority: old,
 		NewPriority: newPriority,
@@ -155,17 +186,34 @@ func (q *Queue) RemoveEntry(id EntryID) (EntryRemoved, error) {
 	heap.Remove(&q.waiting, item.pos)
 	delete(q.index, id)
 
-	return EntryRemoved{EntryID: id, OccurredAt: q.now()}, nil
+	return EntryRemoved{EventSeq: q.newEventSeq(), EntryID: id, OccurredAt: q.now()}, nil
 }
 
 // AssignNext atomically selects the highest-ranked eligible entry,
 // removes it from the active waiting queue, and creates its immutable
 // assignment fact in a single operation — closing the race window a
-// separate "peek, then assign" API would leave open. It returns
-// ErrEmptyQueue if there is no eligible entry.
-func (q *Queue) AssignNext(assigneeID AssigneeID) (Assignment, AssignmentCreated, error) {
+// separate "peek, then assign" API would leave open.
+//
+// commandID must be non-empty (ErrEmptyCommandID otherwise). Retrying
+// AssignNext is not safe on its own: a retry doesn't repeat the
+// previous effect, it claims a different entry. commandID identifies
+// the logical attempt — replaying the same commandID returns the
+// original Assignment and AssignmentCreated instead of claiming again.
+// This dedup window is bounded (see maxCommandHistory); a commandID
+// replayed long after it was evicted is treated as new. See ADR 0003.
+//
+// It returns ErrEmptyQueue if there is no eligible entry and commandID
+// has not been seen before.
+func (q *Queue) AssignNext(assigneeID AssigneeID, commandID string) (Assignment, AssignmentCreated, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	if commandID == "" {
+		return Assignment{}, AssignmentCreated{}, ErrEmptyCommandID
+	}
+	if cached, ok := q.commandResults[commandID]; ok {
+		return cached.assignment, cached.event, nil
+	}
 
 	if q.waiting.Len() == 0 {
 		return Assignment{}, AssignmentCreated{}, ErrEmptyQueue
@@ -187,6 +235,7 @@ func (q *Queue) AssignNext(assigneeID AssigneeID) (Assignment, AssignmentCreated
 	q.assigned[item.entry.ID] = assignment
 
 	event := AssignmentCreated{
+		EventSeq:             q.newEventSeq(),
 		EntryID:              assignment.EntryID,
 		AssigneeID:           assignment.AssigneeID,
 		PriorityAtAssignment: assignment.PriorityAtAssignment,
@@ -194,7 +243,23 @@ func (q *Queue) AssignNext(assigneeID AssigneeID) (Assignment, AssignmentCreated
 		OccurredAt:           now,
 	}
 
+	q.rememberCommand(commandID, assignNextResult{assignment: assignment, event: event})
+
 	return assignment, event, nil
+}
+
+// rememberCommand stores a completed AssignNext result under commandID,
+// evicting the oldest entry once maxCommandHistory is exceeded. Callers
+// must hold q.mu.
+func (q *Queue) rememberCommand(commandID string, result assignNextResult) {
+	q.commandResults[commandID] = result
+	q.commandOrder = append(q.commandOrder, commandID)
+
+	if len(q.commandOrder) > maxCommandHistory {
+		oldest := q.commandOrder[0]
+		q.commandOrder = q.commandOrder[1:]
+		delete(q.commandResults, oldest)
+	}
 }
 
 // CancelAssignment undoes an active assignment and returns the entry to
@@ -226,6 +291,7 @@ func (q *Queue) CancelAssignment(id EntryID) (AssignmentCancelled, error) {
 	q.index[id] = item
 
 	return AssignmentCancelled{
+		EventSeq:   q.newEventSeq(),
 		EntryID:    assignment.EntryID,
 		AssigneeID: assignment.AssigneeID,
 		OccurredAt: q.now(),
@@ -253,6 +319,7 @@ func (q *Queue) Reassign(id EntryID, newAssigneeID AssigneeID) (AssignmentReassi
 	q.assigned[id] = assignment
 
 	return AssignmentReassigned{
+		EventSeq:      q.newEventSeq(),
 		EntryID:       id,
 		OldAssigneeID: oldAssigneeID,
 		NewAssigneeID: newAssigneeID,

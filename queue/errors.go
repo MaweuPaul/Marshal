@@ -20,8 +20,14 @@ var (
 	// waiting entry to assign.
 	ErrEmptyQueue = errors.New("queue: no eligible entries")
 
-	// ErrEntryNotAssigned is returned by CancelAssignment when the given
-	// EntryID is not currently assigned (it may be waiting, or unknown
-	// to the queue entirely).
+	// ErrEntryNotAssigned is returned by CancelAssignment and Reassign
+	// when the given EntryID is not currently assigned (it may be
+	// waiting, or unknown to the queue entirely).
 	ErrEntryNotAssigned = errors.New("queue: entry is not assigned")
+
+	// ErrEmptyCommandID is returned by AssignNext when commandID is
+	// empty. AssignNext requires a non-empty commandID because retrying
+	// it isn't safe on its own — a retry claims a different entry
+	// rather than repeating the previous effect. See ADR 0003.
+	ErrEmptyCommandID = errors.New("queue: commandID must not be empty")
 )

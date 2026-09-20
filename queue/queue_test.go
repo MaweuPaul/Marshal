@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -123,7 +124,7 @@ func TestUpdatePriorityOnAssignedEntryFails(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "e1", 1)
 
-	if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("worker"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 
@@ -147,7 +148,7 @@ func TestAddEntryRejectsDuplicates(t *testing.T) {
 		t.Fatalf("AddEntry() error = %v, want ErrDuplicateEntry", err)
 	}
 
-	if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("worker"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 	if _, err := q.AddEntry("e1", 2); !errors.Is(err, ErrDuplicateEntry) {
@@ -178,7 +179,7 @@ func TestRemoveEntryOnAssignedEntryFails(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "e1", 1)
 
-	if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("worker"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 
@@ -189,7 +190,7 @@ func TestRemoveEntryOnAssignedEntryFails(t *testing.T) {
 
 func TestAssignNextOnEmptyQueue(t *testing.T) {
 	q := New()
-	if _, _, err := q.AssignNext(AssigneeID("worker")); !errors.Is(err, ErrEmptyQueue) {
+	if _, _, err := q.AssignNext(AssigneeID("worker"), nextCommandID()); !errors.Is(err, ErrEmptyQueue) {
 		t.Fatalf("AssignNext() error = %v, want ErrEmptyQueue", err)
 	}
 }
@@ -198,7 +199,7 @@ func TestAssignNextReturnsAssignmentAndEvent(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "e1", 3)
 
-	assignment, event, err := q.AssignNext(AssigneeID("doctor-1"))
+	assignment, event, err := q.AssignNext(AssigneeID("doctor-1"), nextCommandID())
 	if err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
@@ -219,7 +220,7 @@ func TestAssignNextRemovesFromWaiting(t *testing.T) {
 	if got := q.Len(); got != 1 {
 		t.Fatalf("Len() = %d, want 1", got)
 	}
-	if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("worker"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 	if got := q.Len(); got != 0 {
@@ -227,11 +228,127 @@ func TestAssignNextRemovesFromWaiting(t *testing.T) {
 	}
 }
 
+func TestAssignNextRejectsEmptyCommandID(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+
+	if _, _, err := q.AssignNext(AssigneeID("worker"), ""); !errors.Is(err, ErrEmptyCommandID) {
+		t.Fatalf("AssignNext() error = %v, want ErrEmptyCommandID", err)
+	}
+	// The entry must still be waiting -- a rejected command must not
+	// have any side effect.
+	if got := q.Len(); got != 1 {
+		t.Fatalf("Len() = %d after rejected AssignNext, want 1", got)
+	}
+}
+
+// TestAssignNextIsIdempotentForSameCommandID is the core guarantee ADR
+// 0003 requires: replaying the same commandID must return the exact
+// original result, not claim a second entry. This is what makes
+// AssignNext safe to retry after a host-side timeout or crash-recovery
+// resend, within the process's lifetime.
+func TestAssignNextIsIdempotentForSameCommandID(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+	mustAdd(t, q, "e2", 2)
+
+	const cmd = "retry-me"
+
+	first, firstEvent, err := q.AssignNext(AssigneeID("worker"), cmd)
+	if err != nil {
+		t.Fatalf("first AssignNext() error = %v", err)
+	}
+
+	// Retry with the SAME commandID, as if the caller never saw the
+	// first response and resent the request.
+	second, secondEvent, err := q.AssignNext(AssigneeID("worker"), cmd)
+	if err != nil {
+		t.Fatalf("retried AssignNext() error = %v", err)
+	}
+
+	if second != first {
+		t.Fatalf("retried AssignNext() = %+v, want identical to first %+v", second, first)
+	}
+	if secondEvent != firstEvent {
+		t.Fatalf("retried AssignmentCreated = %+v, want identical to first %+v", secondEvent, firstEvent)
+	}
+
+	// e2 must still be waiting -- the retry must not have claimed it.
+	if got := q.Len(); got != 1 {
+		t.Fatalf("Len() = %d after retried AssignNext, want 1 (e2 still waiting)", got)
+	}
+	entry, ok := q.Peek()
+	if !ok || entry.ID != "e2" {
+		t.Fatalf("Peek() = %+v, %v, want e2, true", entry, ok)
+	}
+}
+
+// TestAssignNextCommandCacheEvictsOldestOnceBoundExceeded proves the
+// idempotency cache is actually bounded, not an unbounded map masquerading
+// as one. It temporarily shrinks maxCommandHistory so the eviction can be
+// triggered without needing thousands of calls.
+func TestAssignNextCommandCacheEvictsOldestOnceBoundExceeded(t *testing.T) {
+	old := maxCommandHistory
+	maxCommandHistory = 2
+	defer func() { maxCommandHistory = old }()
+
+	q := New()
+	mustAdd(t, q, "e1", 1)
+	mustAdd(t, q, "e2", 2)
+	mustAdd(t, q, "e3", 3)
+	mustAdd(t, q, "e4", 4)
+
+	first, _, err := q.AssignNext(AssigneeID("worker"), "cmd-1") // claims e1
+	if err != nil {
+		t.Fatalf("AssignNext(cmd-1) error = %v", err)
+	}
+	if _, _, err := q.AssignNext(AssigneeID("worker"), "cmd-2"); err != nil { // claims e2
+		t.Fatalf("AssignNext(cmd-2) error = %v", err)
+	}
+	// This third distinct commandID pushes the cache over its (shrunk)
+	// bound of 2, evicting cmd-1's cached result.
+	if _, _, err := q.AssignNext(AssigneeID("worker"), "cmd-3"); err != nil { // claims e3
+		t.Fatalf("AssignNext(cmd-3) error = %v", err)
+	}
+
+	// cmd-1 has now been evicted -- replaying it must be treated as a
+	// NEW command (claims e4), not return the stale cached result for e1.
+	retried, _, err := q.AssignNext(AssigneeID("worker"), "cmd-1")
+	if err != nil {
+		t.Fatalf("AssignNext(cmd-1) after eviction error = %v", err)
+	}
+	if retried.EntryID == first.EntryID {
+		t.Fatalf("AssignNext(cmd-1) after eviction returned stale cached entry %s, want a new claim", retried.EntryID)
+	}
+	if retried.EntryID != "e4" {
+		t.Fatalf("AssignNext(cmd-1) after eviction claimed %s, want e4", retried.EntryID)
+	}
+}
+
+func TestAssignNextDifferentCommandIDsClaimDifferentEntries(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+	mustAdd(t, q, "e2", 2)
+
+	first, _, err := q.AssignNext(AssigneeID("worker"), "cmd-a")
+	if err != nil {
+		t.Fatalf("first AssignNext() error = %v", err)
+	}
+	second, _, err := q.AssignNext(AssigneeID("worker"), "cmd-b")
+	if err != nil {
+		t.Fatalf("second AssignNext() error = %v", err)
+	}
+
+	if first.EntryID == second.EntryID {
+		t.Fatalf("both commands claimed %s, want two distinct entries", first.EntryID)
+	}
+}
+
 func TestCancelAssignmentReturnsEntryToWaiting(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "e1", 5)
 
-	assignment, _, err := q.AssignNext(AssigneeID("doctor-1"))
+	assignment, _, err := q.AssignNext(AssigneeID("doctor-1"), nextCommandID())
 	if err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
@@ -269,7 +386,7 @@ func TestCancelAssignmentPreservesOriginalQueuePosition(t *testing.T) {
 	mustAdd(t, q, "a", 1) // will be assigned, then cancelled
 	mustAdd(t, q, "b", 1) // same priority, arrived after a
 
-	if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("worker"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 
@@ -304,7 +421,7 @@ func TestCancelAssignmentTwiceFails(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "e1", 1)
 
-	if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("worker"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 	if _, err := q.CancelAssignment("e1"); err != nil {
@@ -319,14 +436,14 @@ func TestCancelledEntryCanBeReassignedAndRecancelled(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "e1", 1)
 
-	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 	if _, err := q.CancelAssignment("e1"); err != nil {
 		t.Fatalf("CancelAssignment() error = %v", err)
 	}
 
-	assignment, _, err := q.AssignNext(AssigneeID("doctor-2"))
+	assignment, _, err := q.AssignNext(AssigneeID("doctor-2"), nextCommandID())
 	if err != nil {
 		t.Fatalf("second AssignNext() error = %v", err)
 	}
@@ -342,7 +459,7 @@ func TestReassignTransfersAssignee(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "e1", 1)
 
-	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 
@@ -365,7 +482,7 @@ func TestReassignDoesNotTouchTheWaitingQueue(t *testing.T) {
 	mustAdd(t, q, "e1", 5)
 	mustAdd(t, q, "e2", 3)
 
-	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil { // claims e2 (rank 3)
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1"), nextCommandID()); err != nil { // claims e2 (rank 3)
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 
@@ -383,7 +500,7 @@ func TestReassignDoesNotTouchTheWaitingQueue(t *testing.T) {
 
 	// A subsequent AssignNext must still give out e1, proving e2 never
 	// went anywhere near the waiting heap.
-	next, _, err := q.AssignNext(AssigneeID("doctor-3"))
+	next, _, err := q.AssignNext(AssigneeID("doctor-3"), nextCommandID())
 	if err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
@@ -412,7 +529,7 @@ func TestReassignAfterCancelFails(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "e1", 1)
 
-	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 	if _, err := q.CancelAssignment("e1"); err != nil {
@@ -432,7 +549,7 @@ func TestReassignFixesTheHandoffBug(t *testing.T) {
 	q := New()
 	mustAdd(t, q, "patient-a", 1)
 
-	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil {
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1"), nextCommandID()); err != nil {
 		t.Fatalf("AssignNext() error = %v", err)
 	}
 
@@ -458,6 +575,42 @@ func TestReassignFixesTheHandoffBug(t *testing.T) {
 	}
 }
 
+// TestEventSeqIsMonotonicAcrossEventTypes proves EventSeq is a single,
+// strictly increasing counter across the whole queue -- not per event
+// type, and not the same thing as Entry.Sequence (which only tracks
+// arrival order). Every command that emits an event should advance it.
+func TestEventSeqIsMonotonicAcrossEventTypes(t *testing.T) {
+	q := New()
+
+	added, err := q.AddEntry("e1", 1)
+	if err != nil {
+		t.Fatalf("AddEntry() error = %v", err)
+	}
+	changed, err := q.UpdatePriority("e1", 2)
+	if err != nil {
+		t.Fatalf("UpdatePriority() error = %v", err)
+	}
+	_, assigned, err := q.AssignNext(AssigneeID("worker"), nextCommandID())
+	if err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+	cancelled, err := q.CancelAssignment("e1")
+	if err != nil {
+		t.Fatalf("CancelAssignment() error = %v", err)
+	}
+	_, reassigned, err := q.AssignNext(AssigneeID("worker"), nextCommandID())
+	if err != nil {
+		t.Fatalf("second AssignNext() error = %v", err)
+	}
+
+	seqs := []uint64{added.EventSeq, changed.EventSeq, assigned.EventSeq, cancelled.EventSeq, reassigned.EventSeq}
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Fatalf("EventSeq not strictly increasing: %v", seqs)
+		}
+	}
+}
+
 // TestAssignNextConcurrentCallersNeverDuplicate is the core concurrency
 // invariant: two callers racing on AssignNext must never receive the
 // same entry. Run with -race.
@@ -480,7 +633,7 @@ func TestAssignNextConcurrentCallersNeverDuplicate(t *testing.T) {
 		go func(worker int) {
 			defer wg.Done()
 			for {
-				assignment, _, err := q.AssignNext(AssigneeID(entryID(worker)))
+				assignment, _, err := q.AssignNext(AssigneeID(entryID(worker)), nextCommandID())
 				if errors.Is(err, ErrEmptyQueue) {
 					return
 				}
@@ -610,7 +763,7 @@ func TestRandomizedConcurrentLoad(t *testing.T) {
 				if done {
 					return
 				}
-				assignment, _, err := q.AssignNext(AssigneeID(entryID(worker)))
+				assignment, _, err := q.AssignNext(AssigneeID(entryID(worker)), nextCommandID())
 				if errors.Is(err, ErrEmptyQueue) {
 					runtime.Gosched()
 					continue
@@ -675,7 +828,7 @@ func assertDrainOrder(t *testing.T, q *Queue, want ...EntryID) {
 		if entry.ID != id {
 			t.Fatalf("step %d: Peek() = %s, want %s", i, entry.ID, id)
 		}
-		if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+		if _, _, err := q.AssignNext(AssigneeID("worker"), nextCommandID()); err != nil {
 			t.Fatalf("step %d: AssignNext() error = %v", i, err)
 		}
 	}
@@ -683,4 +836,13 @@ func assertDrainOrder(t *testing.T, q *Queue, want ...EntryID) {
 
 func entryID(i int) EntryID {
 	return EntryID(fmt.Sprintf("e%d", i))
+}
+
+// nextCommandID returns a fresh, unique commandID for tests that don't
+// care about AssignNext's idempotency behavior specifically — safe to
+// call concurrently from many goroutines.
+var testCmdSeq uint64
+
+func nextCommandID() string {
+	return fmt.Sprintf("cmd-%d", atomic.AddUint64(&testCmdSeq, 1))
 }
