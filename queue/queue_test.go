@@ -227,6 +227,117 @@ func TestAssignNextRemovesFromWaiting(t *testing.T) {
 	}
 }
 
+func TestCancelAssignmentReturnsEntryToWaiting(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 5)
+
+	assignment, _, err := q.AssignNext(AssigneeID("doctor-1"))
+	if err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+	if got := q.Len(); got != 0 {
+		t.Fatalf("Len() = %d after AssignNext, want 0", got)
+	}
+
+	event, err := q.CancelAssignment("e1")
+	if err != nil {
+		t.Fatalf("CancelAssignment() error = %v", err)
+	}
+	if event.EntryID != "e1" || event.AssigneeID != "doctor-1" {
+		t.Fatalf("AssignmentCancelled = %+v, want EntryID=e1 AssigneeID=doctor-1", event)
+	}
+
+	if got := q.Len(); got != 1 {
+		t.Fatalf("Len() = %d after CancelAssignment, want 1", got)
+	}
+	entry, ok := q.Peek()
+	if !ok {
+		t.Fatal("Peek() returned no entry after CancelAssignment")
+	}
+	if entry.ID != "e1" || entry.Priority != 5 || entry.Sequence != assignment.Sequence {
+		t.Fatalf("Peek() = %+v, want ID=e1 Priority=5 Sequence=%d", entry, assignment.Sequence)
+	}
+}
+
+// TestCancelAssignmentPreservesOriginalQueuePosition proves cancellation
+// restores an entry to where it would be had it never been assigned,
+// not to the back of the line — a cancelled assignment isn't the
+// entry's fault, so it must not lose its place to entries that arrived
+// later.
+func TestCancelAssignmentPreservesOriginalQueuePosition(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "a", 1) // will be assigned, then cancelled
+	mustAdd(t, q, "b", 1) // same priority, arrived after a
+
+	if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+
+	// While "a" is assigned, a new same-priority entry arrives.
+	mustAdd(t, q, "c", 1)
+
+	if _, err := q.CancelAssignment("a"); err != nil {
+		t.Fatalf("CancelAssignment() error = %v", err)
+	}
+
+	// "a" must come back ahead of "b" and "c": it arrived before both.
+	assertDrainOrder(t, q, "a", "b", "c")
+}
+
+func TestCancelAssignmentOnWaitingEntryFails(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+
+	if _, err := q.CancelAssignment("e1"); !errors.Is(err, ErrEntryNotAssigned) {
+		t.Fatalf("CancelAssignment() error = %v, want ErrEntryNotAssigned", err)
+	}
+}
+
+func TestCancelAssignmentOnUnknownEntryFails(t *testing.T) {
+	q := New()
+	if _, err := q.CancelAssignment("ghost"); !errors.Is(err, ErrEntryNotAssigned) {
+		t.Fatalf("CancelAssignment() error = %v, want ErrEntryNotAssigned", err)
+	}
+}
+
+func TestCancelAssignmentTwiceFails(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+
+	if _, _, err := q.AssignNext(AssigneeID("worker")); err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+	if _, err := q.CancelAssignment("e1"); err != nil {
+		t.Fatalf("first CancelAssignment() error = %v", err)
+	}
+	if _, err := q.CancelAssignment("e1"); !errors.Is(err, ErrEntryNotAssigned) {
+		t.Fatalf("second CancelAssignment() error = %v, want ErrEntryNotAssigned", err)
+	}
+}
+
+func TestCancelledEntryCanBeReassignedAndRecancelled(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+	if _, err := q.CancelAssignment("e1"); err != nil {
+		t.Fatalf("CancelAssignment() error = %v", err)
+	}
+
+	assignment, _, err := q.AssignNext(AssigneeID("doctor-2"))
+	if err != nil {
+		t.Fatalf("second AssignNext() error = %v", err)
+	}
+	if assignment.EntryID != "e1" || assignment.AssigneeID != "doctor-2" {
+		t.Fatalf("AssignNext() = %+v, want EntryID=e1 AssigneeID=doctor-2", assignment)
+	}
+	if _, err := q.CancelAssignment("e1"); err != nil {
+		t.Fatalf("second CancelAssignment() error = %v", err)
+	}
+}
+
 // TestAssignNextConcurrentCallersNeverDuplicate is the core concurrency
 // invariant: two callers racing on AssignNext must never receive the
 // same entry. Run with -race.

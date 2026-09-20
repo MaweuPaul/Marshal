@@ -3,10 +3,10 @@
 //
 // The package knows nothing about patients, doctors, or any other
 // domain concept. It accepts commands (AddEntry, UpdatePriority,
-// RemoveEntry, AssignNext) and returns the resulting immutable events.
-// Ordering follows two rules: lower Priority (rank) first, then earlier
-// Sequence first. Persistence, transport, and domain meaning all belong
-// to the host application.
+// RemoveEntry, AssignNext, CancelAssignment) and returns the resulting
+// immutable events. Ordering follows two rules: lower Priority (rank)
+// first, then earlier Sequence first. Persistence, transport, and
+// domain meaning all belong to the host application.
 package queue
 
 import (
@@ -195,6 +195,41 @@ func (q *Queue) AssignNext(assigneeID AssigneeID) (Assignment, AssignmentCreated
 	}
 
 	return assignment, event, nil
+}
+
+// CancelAssignment undoes an active assignment and returns the entry to
+// the waiting queue at its original priority and sequence — as if it
+// had never been assigned. It returns ErrEntryNotAssigned if id is not
+// currently assigned.
+//
+// The AssignmentCreated event this cancels is never modified; this
+// produces a new AssignmentCancelled event instead, per the engine's
+// append-only event history (Q5).
+func (q *Queue) CancelAssignment(id EntryID) (AssignmentCancelled, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	assignment, ok := q.assigned[id]
+	if !ok {
+		return AssignmentCancelled{}, ErrEntryNotAssigned
+	}
+	delete(q.assigned, id)
+
+	entry := &Entry{
+		ID:       assignment.EntryID,
+		Priority: assignment.PriorityAtAssignment,
+		Sequence: assignment.Sequence,
+		State:    Waiting,
+	}
+	item := &heapItem{entry: entry}
+	heap.Push(&q.waiting, item)
+	q.index[id] = item
+
+	return AssignmentCancelled{
+		EntryID:    assignment.EntryID,
+		AssigneeID: assignment.AssigneeID,
+		OccurredAt: q.now(),
+	}, nil
 }
 
 // Peek returns the entry AssignNext would currently select, without

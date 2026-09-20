@@ -19,4 +19,9 @@ var (
 	// ErrEmptyQueue is returned by AssignNext when there is no eligible
 	// waiting entry to assign.
 	ErrEmptyQueue = errors.New("queue: no eligible entries")
+
+	// ErrEntryNotAssigned is returned by CancelAssignment when the given
+	// EntryID is not currently assigned (it may be waiting, or unknown
+	// to the queue entirely).
+	ErrEntryNotAssigned = errors.New("queue: entry is not assigned")
 )

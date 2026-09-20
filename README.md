@@ -381,25 +381,27 @@ QUEUE ENGINE
 EVENT(S)
 ```
 
-Possible commands (kept intentionally minimal for v1):
+Commands (kept intentionally minimal):
 
 ```text
 AddEntry
 UpdatePriority
 RemoveEntry
 AssignNext
+CancelAssignment
 ```
 
-Possible emitted events:
+Emitted events:
 
 ```text
 EntryAdded
 PriorityChanged
 EntryRemoved
 AssignmentCreated
+AssignmentCancelled
 ```
 
-A potential future event: `AssignmentCancelled`. The event set is not over-designed up front — it grows only as real needs emerge.
+`CancelAssignment` undoes an active assignment (e.g. a doctor was offered a patient, then had to hand them off) and returns the entry to the waiting queue **at its original priority and sequence** — as if it had never been assigned. It doesn't go to the back of the line: the cancellation wasn't the entry's fault, so it shouldn't lose its place to entries that arrived later. The event set is not over-designed up front beyond this — it grows only as real needs emerge.
 
 ### Example event shapes
 

@@ -44,7 +44,20 @@ type AssignmentCreated struct {
 	OccurredAt           time.Time
 }
 
-func (EntryAdded) isEvent()        {}
-func (PriorityChanged) isEvent()   {}
-func (EntryRemoved) isEvent()      {}
-func (AssignmentCreated) isEvent() {}
+// AssignmentCancelled is emitted when an active assignment is undone by
+// CancelAssignment. The entry returns to the waiting queue at its
+// original priority and sequence — as if it had never been assigned —
+// rather than losing its place for a mistake that wasn't its own. The
+// AssignmentCreated fact this cancels is never edited; this is a new,
+// separate event appended after it.
+type AssignmentCancelled struct {
+	EntryID    EntryID
+	AssigneeID AssigneeID
+	OccurredAt time.Time
+}
+
+func (EntryAdded) isEvent()          {}
+func (PriorityChanged) isEvent()     {}
+func (EntryRemoved) isEvent()        {}
+func (AssignmentCreated) isEvent()   {}
+func (AssignmentCancelled) isEvent() {}
