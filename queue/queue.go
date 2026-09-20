@@ -3,10 +3,10 @@
 //
 // The package knows nothing about patients, doctors, or any other
 // domain concept. It accepts commands (AddEntry, UpdatePriority,
-// RemoveEntry, AssignNext, CancelAssignment) and returns the resulting
-// immutable events. Ordering follows two rules: lower Priority (rank)
-// first, then earlier Sequence first. Persistence, transport, and
-// domain meaning all belong to the host application.
+// RemoveEntry, AssignNext, CancelAssignment, Reassign) and returns the
+// resulting immutable events. Ordering follows two rules: lower
+// Priority (rank) first, then earlier Sequence first. Persistence,
+// transport, and domain meaning all belong to the host application.
 package queue
 
 import (
@@ -229,6 +229,34 @@ func (q *Queue) CancelAssignment(id EntryID) (AssignmentCancelled, error) {
 		EntryID:    assignment.EntryID,
 		AssigneeID: assignment.AssigneeID,
 		OccurredAt: q.now(),
+	}, nil
+}
+
+// Reassign transfers an active assignment directly from its current
+// assignee to newAssigneeID — a hand-off, not a return to the queue.
+// The entry never re-enters the waiting queue and is never at risk of
+// being intercepted by a higher-priority (or earlier-sequence) arrival
+// in between, unlike a CancelAssignment followed by AssignNext, which
+// offers no guarantee of getting the same entry back. It returns
+// ErrEntryNotAssigned if id is not currently assigned.
+func (q *Queue) Reassign(id EntryID, newAssigneeID AssigneeID) (AssignmentReassigned, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	assignment, ok := q.assigned[id]
+	if !ok {
+		return AssignmentReassigned{}, ErrEntryNotAssigned
+	}
+
+	oldAssigneeID := assignment.AssigneeID
+	assignment.AssigneeID = newAssigneeID
+	q.assigned[id] = assignment
+
+	return AssignmentReassigned{
+		EntryID:       id,
+		OldAssigneeID: oldAssigneeID,
+		NewAssigneeID: newAssigneeID,
+		OccurredAt:    q.now(),
 	}, nil
 }
 

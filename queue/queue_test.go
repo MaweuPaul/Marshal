@@ -338,6 +338,126 @@ func TestCancelledEntryCanBeReassignedAndRecancelled(t *testing.T) {
 	}
 }
 
+func TestReassignTransfersAssignee(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+
+	event, err := q.Reassign("e1", AssigneeID("doctor-2"))
+	if err != nil {
+		t.Fatalf("Reassign() error = %v", err)
+	}
+	if event.EntryID != "e1" || event.OldAssigneeID != "doctor-1" || event.NewAssigneeID != "doctor-2" {
+		t.Fatalf("AssignmentReassigned = %+v, want EntryID=e1 OldAssigneeID=doctor-1 NewAssigneeID=doctor-2", event)
+	}
+}
+
+// TestReassignDoesNotTouchTheWaitingQueue is the whole point of
+// Reassign existing: unlike CancelAssignment followed by AssignNext, a
+// direct hand-off must never risk a higher-priority arrival
+// intercepting the entry. The waiting queue must be completely
+// unaffected by a Reassign call.
+func TestReassignDoesNotTouchTheWaitingQueue(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 5)
+	mustAdd(t, q, "e2", 3)
+
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil { // claims e2 (rank 3)
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+
+	if _, err := q.Reassign("e2", AssigneeID("doctor-2")); err != nil {
+		t.Fatalf("Reassign() error = %v", err)
+	}
+
+	if got := q.Len(); got != 1 {
+		t.Fatalf("Len() = %d after Reassign, want 1 (e1 still waiting)", got)
+	}
+	entry, ok := q.Peek()
+	if !ok || entry.ID != "e1" {
+		t.Fatalf("Peek() = %+v, %v, want e1, true", entry, ok)
+	}
+
+	// A subsequent AssignNext must still give out e1, proving e2 never
+	// went anywhere near the waiting heap.
+	next, _, err := q.AssignNext(AssigneeID("doctor-3"))
+	if err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+	if next.EntryID != "e1" {
+		t.Fatalf("AssignNext() = %+v, want EntryID=e1", next)
+	}
+}
+
+func TestReassignOnWaitingEntryFails(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+
+	if _, err := q.Reassign("e1", AssigneeID("doctor-1")); !errors.Is(err, ErrEntryNotAssigned) {
+		t.Fatalf("Reassign() error = %v, want ErrEntryNotAssigned", err)
+	}
+}
+
+func TestReassignOnUnknownEntryFails(t *testing.T) {
+	q := New()
+	if _, err := q.Reassign("ghost", AssigneeID("doctor-1")); !errors.Is(err, ErrEntryNotAssigned) {
+		t.Fatalf("Reassign() error = %v, want ErrEntryNotAssigned", err)
+	}
+}
+
+func TestReassignAfterCancelFails(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "e1", 1)
+
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+	if _, err := q.CancelAssignment("e1"); err != nil {
+		t.Fatalf("CancelAssignment() error = %v", err)
+	}
+
+	if _, err := q.Reassign("e1", AssigneeID("doctor-2")); !errors.Is(err, ErrEntryNotAssigned) {
+		t.Fatalf("Reassign() after cancel error = %v, want ErrEntryNotAssigned", err)
+	}
+}
+
+// TestReassignFixesTheHandoffBug is the exact scenario that motivated
+// Reassign: hand off an assigned entry while a higher-priority entry
+// arrives in the meantime. CancelAssignment+AssignNext would give the
+// new assignee the wrong entry; Reassign must not.
+func TestReassignFixesTheHandoffBug(t *testing.T) {
+	q := New()
+	mustAdd(t, q, "patient-a", 1)
+
+	if _, _, err := q.AssignNext(AssigneeID("doctor-1")); err != nil {
+		t.Fatalf("AssignNext() error = %v", err)
+	}
+
+	// A more urgent patient arrives while patient-a is assigned.
+	mustAdd(t, q, "patient-x", 0)
+
+	event, err := q.Reassign("patient-a", AssigneeID("doctor-2"))
+	if err != nil {
+		t.Fatalf("Reassign() error = %v", err)
+	}
+	if event.EntryID != "patient-a" {
+		t.Fatalf("Reassign() handed off %s, want patient-a", event.EntryID)
+	}
+
+	// patient-x must still be untouched, waiting, unaffected by the
+	// hand-off of an unrelated already-assigned entry.
+	if got := q.Len(); got != 1 {
+		t.Fatalf("Len() = %d, want 1 (patient-x still waiting)", got)
+	}
+	entry, ok := q.Peek()
+	if !ok || entry.ID != "patient-x" {
+		t.Fatalf("Peek() = %+v, %v, want patient-x, true", entry, ok)
+	}
+}
+
 // TestAssignNextConcurrentCallersNeverDuplicate is the core concurrency
 // invariant: two callers racing on AssignNext must never receive the
 // same entry. Run with -race.

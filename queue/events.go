@@ -56,8 +56,22 @@ type AssignmentCancelled struct {
 	OccurredAt time.Time
 }
 
-func (EntryAdded) isEvent()          {}
-func (PriorityChanged) isEvent()     {}
-func (EntryRemoved) isEvent()        {}
-func (AssignmentCreated) isEvent()   {}
-func (AssignmentCancelled) isEvent() {}
+// AssignmentReassigned is emitted when an active assignment's assignee
+// is changed directly by Reassign — a hand-off from one assignee to
+// another, with no re-entry into the waiting queue and no risk of a
+// higher-priority arrival intercepting the entry in between. The
+// AssignmentCreated fact this follows is never edited; this is a new,
+// separate event appended after it.
+type AssignmentReassigned struct {
+	EntryID       EntryID
+	OldAssigneeID AssigneeID
+	NewAssigneeID AssigneeID
+	OccurredAt    time.Time
+}
+
+func (EntryAdded) isEvent()           {}
+func (PriorityChanged) isEvent()      {}
+func (EntryRemoved) isEvent()         {}
+func (AssignmentCreated) isEvent()    {}
+func (AssignmentCancelled) isEvent()  {}
+func (AssignmentReassigned) isEvent() {}
