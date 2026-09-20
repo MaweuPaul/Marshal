@@ -21,6 +21,37 @@ func TestAddEntryOrdersByPriorityThenSequence(t *testing.T) {
 	assertDrainOrder(t, q, "red-1", "orange-1", "yellow-1", "yellow-2", "green-1")
 }
 
+// TestQueueIsAgnosticToPriorityScheme proves the engine doesn't secretly
+// assume a small range like SATS's 1-4. Here priority comes from a
+// completely different, unrelated scheme (a support-ticket system with
+// wide, sparse ranks) and ordering still behaves identically: lower
+// rank first, sequence breaks ties. The queue package has no idea
+// these numbers came from ticket severities instead of triage
+// categories — that's the point.
+func TestQueueIsAgnosticToPriorityScheme(t *testing.T) {
+	const (
+		critical Priority = 100
+		high     Priority = 250
+		normal   Priority = 500
+		low      Priority = 999
+	)
+
+	q := New()
+	mustAdd(t, q, "ticket-low-1", low)
+	mustAdd(t, q, "ticket-normal-1", normal)
+	mustAdd(t, q, "ticket-high-1", high)
+	mustAdd(t, q, "ticket-critical-1", critical)
+	mustAdd(t, q, "ticket-normal-2", normal) // same rank as ticket-normal-1, added later
+
+	assertDrainOrder(t, q,
+		"ticket-critical-1",
+		"ticket-high-1",
+		"ticket-normal-1", // earlier sequence than ticket-normal-2, same rank
+		"ticket-normal-2",
+		"ticket-low-1",
+	)
+}
+
 func TestUpdatePriorityPromotionReorders(t *testing.T) {
 	q := New()
 
